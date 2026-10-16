@@ -1,0 +1,987 @@
+/* ============================================================
+   HYPER CLEAN 管道疏通泡沫 · 三维原理演示
+   罐子按视频实拍比例程序化建模；台盆 + 透明存水弯剖面参照电商原理图。
+   单位：米。可调尺寸集中在 DIM，动画时间轴集中在 TL。
+   整个场景是时间 T 的纯函数（evaluate），所以能随意拖进度条。
+   ============================================================ */
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { paintLabel, paintCapRing } from './label.js';
+
+/* ---------- 尺寸表（视频里罐身宽 150px ≈ 65mm 反推） ---------- */
+export const DIM = {
+  can:   { r: 0.0325, body: 0.151, rim: 0.005, shoulder: 0.036, neck: 0.006 },
+  cap:   { h: 0.032 },
+  basin: { R: 0.20, D: 0.13, t: 0.012, sx: 1.35, drain: 0.021 },   // 椭圆台盆：长轴 = R × sx
+  counter: { w: 1.30, d: 0.44, t: 0.03 },
+  pipe:  { r: 0.022, rIn: 0.0185, top: -0.20, bottom: -0.62 },     // 透明存水弯（40mm 管）
+  home:  [-0.46, 0, -0.17],                                        // 罐子平时站在台面左侧
+};
+const CAN_H = DIM.can.body + DIM.can.shoulder + DIM.can.neck + DIM.cap.h;
+const PINK = 0xf48cbf;            // 罐肩 / 瓶盖的粉（取自视频）
+const PINK_CSS = '#f48cbf';
+
+/* ---------- 动画时间轴（秒） ---------- */
+export const TL = {
+  twist: [0, 1.2], lift: [1.2, 1.6], shake: [1.5, 2.6], move: [2.6, 4.0], press: [4.0, 4.6],
+  basin: [4.6, 6.8], foam: [5.0, 9.0], back: [9.0, 10.5], unTwist: [10.5, 11.0], soak: [10.6, 12.4],
+  stream: [12.5, 15.5], basinOut: [12.8, 14.6], water: [13.0, 15.8], waterTail: [14.8, 17.2],
+  shine: [16.5, 18.0], end: 18.2,
+};
+const STEPS = [
+  [0,    '① 扭到 OPEN 档'],
+  [1.2,  '② 摇匀 10 次'],
+  [2.6,  '③ 倒扣，按住下水口'],
+  [4.6,  '④ 泡沫灌满存水弯，裹住污垢'],
+  [9.0,  '⑤ 静置 30 分钟，分解油污 · 杀菌'],
+  [12.5, '⑥ 打开水龙头冲净'],
+  [16.5, '✨ 管道通畅 · 洁净无味'],
+];
+
+/* ---------- 小工具 ---------- */
+const V3 = THREE.Vector3;
+const clamp01 = x => x < 0 ? 0 : x > 1 ? 1 : x;
+const seg = (t, [a, b]) => clamp01((t - a) / (b - a));
+const sstep = x => x * x * (3 - 2 * x);
+const ease = x => x < 0.5 ? 4 * x * x * x : 1 - (-2 * x + 2) ** 3 / 2;
+const lerp = (a, b, k) => a + (b - a) * k;
+let _seed = 20261016;
+const rnd = () => (_seed = (_seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
+const rand = (a, b) => a + (b - a) * rnd();
+
+function cvs(w, h, draw) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+function texOf(canvas) {
+  const t = new THREE.CanvasTexture(canvas);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 8;
+  return t;
+}
+
+/* ---------- 渲染器 / 场景 / 相机 ---------- */
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.NeutralToneMapping;
+renderer.toneMappingExposure = 1.0;
+document.getElementById('app').appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+function bgTex(inner, outer) {
+  return cvs(512, 512, (g, w, h) => {
+    const gr = g.createRadialGradient(w * 0.45, h * 0.35, 10, w / 2, h / 2, w * 0.78);
+    gr.addColorStop(0, inner); gr.addColorStop(1, outer);
+    g.fillStyle = gr; g.fillRect(0, 0, w, h);
+  });
+}
+const BG = { light: bgTex('#f6fcff', '#94c8ec'), dark: bgTex('#2b2b33', '#0f0f12') };
+scene.background = BG.light;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0xb9d3e8, 0.9));
+const key = new THREE.DirectionalLight(0xffffff, 1.5); key.position.set(-1, 2, 1.6); scene.add(key);
+const fill = new THREE.DirectionalLight(0xe2f0ff, 0.5); fill.position.set(1.3, 0.2, 1.0); scene.add(fill);
+
+const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.01, 50);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 0.12;
+controls.maxDistance = 4;
+
+const MODEL = new THREE.Group();
+scene.add(MODEL);
+
+/* ---------- 材质 ---------- */
+const M = {
+  chrome:  new THREE.MeshStandardMaterial({ color: 0xe8eaee, metalness: 1, roughness: 0.14 }),
+  brass:   new THREE.MeshStandardMaterial({ color: 0xd8b679, metalness: 1, roughness: 0.25 }),
+  ceramic: new THREE.MeshPhysicalMaterial({ color: 0xfbfbfb, roughness: 0.18, clearcoat: 0.7, clearcoatRoughness: 0.2, side: THREE.DoubleSide }),
+  cut:     new THREE.MeshStandardMaterial({ color: 0xc4c8cf, roughness: 0.7, side: THREE.DoubleSide }),
+  pinkPlastic: new THREE.MeshPhysicalMaterial({ color: PINK, roughness: 0.32, clearcoat: 0.5, clearcoatRoughness: 0.3 }),
+  tin:     new THREE.MeshStandardMaterial({ color: 0xd9dbe0, metalness: 1, roughness: 0.28 }),
+};
+
+/* ---------- 共享 shader 片段 ---------- */
+const VS_COMMON = /* glsl */`
+  varying vec2 vUv; varying vec3 vW; varying vec3 vN;
+  void main(){
+    vec4 p = vec4(position, 1.0);
+    vec3 n = normal;
+    #ifdef USE_INSTANCING
+      p = instanceMatrix * p;
+      n = mat3(instanceMatrix) * n;
+    #endif
+    vec4 w = modelMatrix * p;
+    vW = w.xyz;
+    vN = normalize(mat3(modelMatrix) * n);
+    vUv = uv;
+    gl_Position = projectionMatrix * viewMatrix * w;
+  }`;
+const GLSL_NOISE = /* glsl */`
+  vec3 hash3(vec3 p){
+    p = vec3(dot(p, vec3(127.1, 311.7, 74.7)), dot(p, vec3(269.5, 183.3, 246.1)), dot(p, vec3(113.5, 271.9, 124.6)));
+    return fract(sin(p) * 43758.5453);
+  }
+  vec2 worley(vec3 p){                 // x = 到最近泡泡中心距离, y = 泡泡壁距离
+    vec3 i = floor(p), f = fract(p);
+    float d1 = 9.0, d2 = 9.0;
+    for (int x = -1; x <= 1; x++) for (int y = -1; y <= 1; y++) for (int z = -1; z <= 1; z++) {
+      vec3 o = vec3(x, y, z);
+      vec3 r = o + hash3(i + o) - f;
+      float d = dot(r, r);
+      if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) d2 = d;
+    }
+    return vec2(sqrt(d1), sqrt(d2) - sqrt(d1));
+  }
+  float vnoise(vec3 p){
+    vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+    float a = hash3(i).x, b = hash3(i + vec3(1,0,0)).x, c = hash3(i + vec3(0,1,0)).x, d = hash3(i + vec3(1,1,0)).x;
+    float e = hash3(i + vec3(0,0,1)).x, f1 = hash3(i + vec3(1,0,1)).x, g = hash3(i + vec3(0,1,1)).x, h = hash3(i + vec3(1,1,1)).x;
+    return mix(mix(mix(a, b, f.x), mix(c, d, f.x), f.y), mix(mix(e, f1, f.x), mix(g, h, f.x), f.y), f.z);
+  }`;
+const uTime = { value: 0 };
+
+/* 泡沫：粉色细密泡泡（Worley 噪声），uv.x 超出 [uTail, uHead] 的部分裁掉 = 泡沫前沿 */
+function foamMat(head = 9, tail = -9) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uTime, uHead: { value: head }, uTail: { value: tail },
+      uA: { value: new THREE.Color('#ffd3e6') }, uB: { value: new THREE.Color('#ee7fb3') },
+    },
+    vertexShader: VS_COMMON,
+    fragmentShader: GLSL_NOISE + /* glsl */`
+      uniform float uHead, uTail, uTime; uniform vec3 uA, uB;
+      varying vec2 vUv; varying vec3 vW; varying vec3 vN;
+      void main(){
+        if (vUv.x > uHead || vUv.x < uTail) discard;
+        vec3 p = vW * 240.0 + vec3(0.0, uTime * 0.5, uTime * 0.25);
+        vec2 a = worley(p), b = worley(p * 2.2 + 7.0);
+        float wall = min(a.y, b.y * 1.4);
+        vec3 N = normalize(vN), V = normalize(cameraPosition - vW);
+        if (!gl_FrontFacing) N = -N;
+        float dif = 0.62 + 0.38 * max(dot(N, normalize(vec3(-0.4, 0.9, 0.5))), 0.0);
+        vec3 col = mix(uB, uA, smoothstep(0.0, 0.22, wall)) * dif;
+        col += smoothstep(0.30, 0.05, a.x) * 0.22;
+        col += pow(1.0 - abs(dot(N, V)), 2.5) * 0.35;
+        gl_FragColor = vec4(col, 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }`,
+  });
+}
+
+/* 玻璃：边缘亮、中间透（电商原理图那种干净的玻璃管），uSweep = 冲净后的扫光 */
+function glassMat(op = 1) {
+  return new THREE.ShaderMaterial({
+    uniforms: { uSweep: { value: -9 }, uOp: { value: op }, uTint: { value: new THREE.Color('#cfe9ff') } },
+    vertexShader: VS_COMMON,
+    fragmentShader: /* glsl */`
+      uniform float uSweep, uOp; uniform vec3 uTint;
+      varying vec2 vUv; varying vec3 vW; varying vec3 vN;
+      void main(){
+        vec3 N = normalize(vN), V = normalize(cameraPosition - vW);
+        if (!gl_FrontFacing) N = -N;
+        float f = pow(1.0 - abs(dot(N, V)), 2.2);
+        float spec = pow(max(dot(reflect(-V, N), normalize(vec3(-0.3, 0.8, 0.6))), 0.0), 40.0);
+        float band = exp(-pow((vUv.x - uSweep) * 22.0, 2.0));
+        float a = (0.05 + 0.55 * f + spec * 0.8 + band * 0.45) * uOp;
+        vec3 col = mix(uTint, vec3(1.0), 0.45 + 0.55 * f) + spec + band * 0.6;
+        gl_FragColor = vec4(col, clamp(a, 0.0, 1.0));
+        #include <colorspace_fragment>
+      }`,
+    transparent: true, depthWrite: false, side: THREE.DoubleSide,
+  });
+}
+
+/* 清水：淡蓝半透明 + 流动水纹 */
+function waterMat(stream = false) {
+  return new THREE.ShaderMaterial({
+    uniforms: { uTime, uHead: { value: 9 }, uTail: { value: -9 } },
+    defines: stream ? { STREAM: 1 } : {},
+    vertexShader: VS_COMMON,
+    fragmentShader: /* glsl */`
+      uniform float uHead, uTail, uTime;
+      varying vec2 vUv; varying vec3 vW; varying vec3 vN;
+      void main(){
+        #ifdef STREAM
+          float s = 0.5 + 0.5 * sin(vW.y * 320.0 + uTime * 40.0 + sin(vUv.x * 18.85) * 1.5);
+        #else
+          if (vUv.x > uHead || vUv.x < uTail) discard;
+          float s = 0.5 + 0.5 * sin(vUv.x * 260.0 - uTime * 28.0 + sin(vUv.y * 18.85) * 2.0);
+        #endif
+        vec3 N = normalize(vN), V = normalize(cameraPosition - vW);
+        float f = pow(1.0 - abs(dot(N, V)), 2.0);
+        vec3 col = mix(vec3(0.50, 0.78, 1.0), vec3(0.92, 0.98, 1.0), s * 0.7) + f * 0.3;
+        gl_FragColor = vec4(col, 0.5 + 0.35 * f);
+        #include <colorspace_fragment>
+      }`,
+    transparent: true, depthWrite: false,
+  });
+}
+
+/* 管壁上的褐色污垢膜：浸泡时变淡，清水冲过的地方消失 */
+function grimeMat() {
+  return new THREE.ShaderMaterial({
+    uniforms: { uClean: { value: -1 }, uDirt: { value: 1 } },
+    vertexShader: VS_COMMON,
+    fragmentShader: GLSL_NOISE + /* glsl */`
+      uniform float uClean, uDirt;
+      varying vec2 vUv; varying vec3 vW; varying vec3 vN;
+      void main(){
+        if (vUv.x < uClean) discard;
+        float n = vnoise(vW * 70.0) * 0.6 + vnoise(vW * 190.0) * 0.4;
+        float m = smoothstep(0.42, 0.72, n) * smoothstep(0.10, 0.22, vUv.x) * smoothstep(0.82, 0.68, vUv.x);
+        float a = m * 0.8 * uDirt;
+        if (a < 0.01) discard;
+        vec3 col = mix(vec3(0.30, 0.19, 0.10), vec3(0.55, 0.40, 0.24), vnoise(vW * 400.0));
+        gl_FragColor = vec4(col, a);
+        #include <colorspace_fragment>
+      }`,
+    transparent: true, depthWrite: false, side: THREE.DoubleSide,
+  });
+}
+
+/* ============================================================
+   台面 + 剖开的椭圆台盆
+   ============================================================ */
+const B = DIM.basin;
+function yIn(r)  { const k = clamp01(r / B.R);         return -B.D * Math.pow(1 - Math.pow(k, 2.5), 0.55); }
+function yOut(r) { const k = clamp01(r / (B.R + B.t)); return -(B.D + B.t) * Math.pow(1 - Math.pow(k, 2.5), 0.55); }
+const DRAIN_Y = yIn(B.drain);
+
+function marbleTex() {
+  const t = cvs(1024, 1024, (g, w, h) => {
+    g.fillStyle = '#f7f7f5'; g.fillRect(0, 0, w, h);
+    for (let i = 0; i < 9; i++) {
+      g.strokeStyle = `rgba(150,150,160,${0.08 + rnd() * 0.12})`;
+      g.lineWidth = 1 + rnd() * 3;
+      g.beginPath(); g.moveTo(rnd() * w, 0);
+      g.bezierCurveTo(rnd() * w, h * 0.3, rnd() * w, h * 0.7, rnd() * w, h);
+      g.stroke();
+    }
+  });
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+
+{
+  const { w, d, t } = DIM.counter;
+  const rx = B.R * B.sx, rz = B.R;
+  const s = new THREE.Shape();
+  s.moveTo(-w / 2, 0); s.lineTo(-rx, 0);
+  for (let i = 1; i <= 64; i++) { const a = Math.PI + Math.PI * i / 64; s.lineTo(rx * Math.cos(a), rz * Math.sin(a)); }
+  s.lineTo(w / 2, 0); s.lineTo(w / 2, -d); s.lineTo(-w / 2, -d); s.closePath();
+  const geo = new THREE.ExtrudeGeometry(s, { depth: t, bevelEnabled: false });
+  geo.rotateX(Math.PI / 2);            // 形状 y → 世界 z（向后为负），挤出方向 → 向下
+  const mat = new THREE.MeshPhysicalMaterial({ map: marbleTex(), roughness: 0.25, clearcoat: 0.4 });
+  MODEL.add(new THREE.Mesh(geo, mat));
+
+  // 台盆：闭合截面（内壁 → 盆沿 → 外壁 → 下水口）车削半圈，只留后半边
+  const prof = [], N = 44;
+  for (let i = 0; i <= N; i++) { const r = B.drain + (B.R - B.drain) * Math.sin(i / N * Math.PI / 2); prof.push(new THREE.Vector2(r, yIn(r))); }
+  for (let i = N; i >= 0; i--) { const r = B.drain + (B.R + B.t - B.drain) * Math.sin(i / N * Math.PI / 2); prof.push(new THREE.Vector2(r, yOut(r))); }
+  prof.push(prof[0].clone());
+  const bowl = new THREE.LatheGeometry(prof, 120, Math.PI / 2, Math.PI);
+  bowl.scale(B.sx, 1, 1);
+  bowl.computeVertexNormals();
+  MODEL.add(new THREE.Mesh(bowl, M.ceramic));
+  // 两个剖切面（灰色截面，和原理图一样）
+  for (const sgn of [1, -1]) {
+    const sh = new THREE.Shape(prof.map(p => new THREE.Vector2(sgn * p.x * B.sx, p.y)));
+    MODEL.add(new THREE.Mesh(new THREE.ShapeGeometry(sh), M.cut));
+  }
+  // 台面剖切面也上一道灰
+  const cutFace = new THREE.Mesh(new THREE.PlaneGeometry(w / 2 - rx, t), M.cut);
+  for (const sgn of [1, -1]) {
+    const m = cutFace.clone();
+    m.position.set(sgn * (rx + (w / 2 - rx) / 2), -t / 2, 0.0005);
+    MODEL.add(m);
+  }
+
+  // 下水口不锈钢圈（后半圈）
+  const ring = new THREE.Mesh(new THREE.RingGeometry(B.drain - 0.002, B.drain + 0.012, 48, 1, 0, Math.PI), M.chrome);
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.y = DRAIN_Y + 0.0015;
+  MODEL.add(ring);
+  const lip = new THREE.Mesh(new THREE.CylinderGeometry(B.drain, B.drain, 0.014, 40, 1, true, Math.PI / 2, Math.PI), M.chrome);
+  lip.position.y = DRAIN_Y - 0.006;
+  MODEL.add(lip);
+
+  // 水龙头
+  const fz = -0.30;
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.024, 0.026, 0.05, 40), M.chrome);
+  base.position.set(0, 0.025, fz); MODEL.add(base);
+  const riser = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.016, 0.13, 32), M.chrome);
+  riser.position.set(0, 0.11, fz); MODEL.add(riser);
+  const spoutCurve = new THREE.CatmullRomCurve3([
+    new V3(0, 0.165, fz), new V3(0, 0.195, fz + 0.04), new V3(0, 0.19, fz + 0.12), new V3(0, 0.162, fz + 0.17),
+  ]);
+  MODEL.add(new THREE.Mesh(new THREE.TubeGeometry(spoutCurve, 48, 0.011, 20), M.chrome));
+  const tipCap = new THREE.Mesh(new THREE.SphereGeometry(0.0112, 20, 12), M.chrome);
+  tipCap.position.set(0, 0.165, fz); MODEL.add(tipCap);
+  const aer = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.012, 24), M.chrome);
+  aer.position.set(0, 0.158, fz + 0.17); MODEL.add(aer);
+  const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.004, 0.004, 0.07, 12), M.chrome);
+  handle.position.set(0, 0.2, fz - 0.02); handle.rotation.x = -0.7; MODEL.add(handle);
+}
+const SPOUT_TIP = new V3(0, 0.152, -0.13);
+
+/* ============================================================
+   下水管：镀铬尾管 + 透明 S 形存水弯
+   ============================================================ */
+function pipeCurve(y0) {
+  const P = [];
+  const add = (x, y) => { const l = P[P.length - 1]; if (!l || Math.hypot(l.x - x, l.y - y) > 1e-4) P.push(new V3(x, y, 0)); };
+  const line = (x0, y0_, x1, y1) => {
+    const n = Math.max(2, Math.ceil(Math.hypot(x1 - x0, y1 - y0_) / 0.01));
+    for (let i = 0; i <= n; i++) add(lerp(x0, x1, i / n), lerp(y0_, y1, i / n));
+  };
+  const arc = (cx, cy, R, a0, a1) => { for (let i = 0; i <= 24; i++) { const a = lerp(a0, a1, i / 24); add(cx + R * Math.cos(a), cy + R * Math.sin(a)); } };
+  line(0, y0, 0, -0.36);
+  arc(0.075, -0.36, 0.075, Math.PI, 2 * Math.PI);    // 下 U 弯（存水）
+  line(0.15, -0.36, 0.15, -0.27);
+  arc(0.225, -0.27, 0.075, Math.PI, 0);              // 上 弯
+  line(0.30, -0.27, 0.30, DIM.pipe.bottom);
+  return new THREE.CatmullRomCurve3(P, false, 'centripetal');
+}
+const FLOW  = pipeCurve(DRAIN_Y + 0.004);   // 泡沫/清水走的路线：从下水口一直到出口
+const GLASS = pipeCurve(DIM.pipe.top);
+const FLOW_L = FLOW.getLength();
+const uAtY = y => (DRAIN_Y + 0.004 - y) / FLOW_L;                 // 左侧竖管上某高度对应的进度
+const U_BOTTOM = (DRAIN_Y + 0.004 + 0.36 + 0.075 * Math.PI / 2) / FLOW_L;   // U 弯最低点
+
+const _p = new V3(), _t = new V3(), _n = new V3(), Z = new V3(0, 0, 1);
+/* 管内某进度 u、绕管角 a、离轴 r 的位置（管子在 XY 平面，副法线恒为 Z） */
+function inPipe(u, a, r, out) {
+  FLOW.getPointAt(clamp01(u), _p);
+  FLOW.getTangentAt(clamp01(u), _t);
+  _n.set(-_t.y, _t.x, 0);
+  return out.copy(_p).addScaledVector(_n, Math.cos(a) * r).addScaledVector(Z, Math.sin(a) * r);
+}
+
+{
+  const P = DIM.pipe;
+  // 镀铬尾管 + 黄铜锁母
+  const tailLen = DRAIN_Y - B.t - P.top + 0.006;
+  const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.019, 0.019, tailLen, 40), M.chrome);
+  tail.position.y = P.top + tailLen / 2 - 0.004;
+  MODEL.add(tail);
+  const nutTop = new THREE.Mesh(new THREE.CylinderGeometry(0.029, 0.029, 0.012, 40), M.chrome);
+  nutTop.position.y = DRAIN_Y - B.t - 0.008;
+  MODEL.add(nutTop);
+  const nut = new THREE.Mesh(new THREE.CylinderGeometry(0.027, 0.027, 0.018, 6), M.brass);
+  nut.position.y = P.top + 0.002;
+  MODEL.add(nut);
+  const outNut = nut.clone();
+  outNut.position.set(0.30, P.bottom + 0.012, 0);
+  MODEL.add(outNut);
+}
+
+// 透明管（最后渲染）
+const glassM = glassMat();
+const glassTube = new THREE.Mesh(new THREE.TubeGeometry(GLASS, 420, DIM.pipe.r, 32), glassM);
+glassTube.renderOrder = 10;
+MODEL.add(glassTube);
+
+// 管壁污垢膜
+const grimeM = grimeMat();
+const grimeTube = new THREE.Mesh(new THREE.TubeGeometry(FLOW, 500, DIM.pipe.r - 0.0012, 28), grimeM);
+grimeTube.renderOrder = 8;
+MODEL.add(grimeTube);
+
+// 管内泡沫柱 + 前沿圆头
+const foamTubeM = foamMat(0, 0);
+const foamTube = new THREE.Mesh(new THREE.TubeGeometry(FLOW, 500, DIM.pipe.rIn, 24), foamTubeM);
+MODEL.add(foamTube);
+const foamHead = new THREE.Mesh(new THREE.SphereGeometry(DIM.pipe.rIn, 24, 16), foamMat());
+MODEL.add(foamHead);
+
+// 管内清水
+const waterTubeM = waterMat();
+const waterTube = new THREE.Mesh(new THREE.TubeGeometry(FLOW, 500, DIM.pipe.rIn * 0.98, 24), waterTubeM);
+waterTube.renderOrder = 9;
+MODEL.add(waterTube);
+
+// 水龙头水柱
+const STREAM_LEN = SPOUT_TIP.y - yIn(Math.abs(SPOUT_TIP.z));
+const stream = new THREE.Mesh(new THREE.CylinderGeometry(0.0042, 0.0055, 1, 16, 1, true), waterMat(true));
+stream.renderOrder = 9;
+MODEL.add(stream);
+
+/* ============================================================
+   罐子（枢轴在罐子中心，翻转时绕中心转）
+   ============================================================ */
+const CAN = new THREE.Group();
+const CANBODY = new THREE.Group();
+CANBODY.position.y = -CAN_H / 2;
+CAN.add(CANBODY);
+MODEL.add(CAN);
+const CAPG = new THREE.Group();
+
+const labelTex = texOf(paintLabel());
+{
+  const { r, body, rim, shoulder, neck } = DIM.can;
+  // 底部马口铁边
+  const bot = new THREE.Mesh(new THREE.LatheGeometry([
+    new THREE.Vector2(0, 0.003), new THREE.Vector2(r - 0.004, 0.003), new THREE.Vector2(r - 0.0015, 0),
+    new THREE.Vector2(r, 0.0015), new THREE.Vector2(r, rim),
+  ], 64), M.tin);
+  CANBODY.add(bot);
+  // 罐身标签
+  const labelM = new THREE.MeshPhysicalMaterial({ map: labelTex, roughness: 0.3, metalness: 0.1, clearcoat: 0.6, clearcoatRoughness: 0.15 });
+  const bodyM = new THREE.Mesh(new THREE.CylinderGeometry(r, r, body - rim, 128, 1, true, Math.PI), labelM);
+  bodyM.position.y = rim + (body - rim) / 2;
+  CANBODY.add(bodyM);
+  // 若有真实设计稿 label.png，自动替换
+  new THREE.TextureLoader().load('label.png', t => {
+    t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+    labelM.map = t; labelM.needsUpdate = true;
+  }, undefined, () => {});
+  // 粉色罐肩
+  const sh = new THREE.Mesh(new THREE.LatheGeometry([
+    new THREE.Vector2(0, 0), new THREE.Vector2(r + 0.0006, 0), new THREE.Vector2(r + 0.0006, 0.003),
+    new THREE.Vector2(r * 0.99, 0.02), new THREE.Vector2(r * 0.975, 0.029), new THREE.Vector2(r * 0.93, 0.0338),
+    new THREE.Vector2(r * 0.80, 0.0358), new THREE.Vector2(0.016, shoulder), new THREE.Vector2(0, shoulder),
+  ], 96), M.pinkPlastic);
+  sh.position.y = body;
+  CANBODY.add(sh);
+  // 颈 + 对位小三角
+  const nk = new THREE.Mesh(new THREE.CylinderGeometry(0.0125, 0.0125, neck, 40), M.pinkPlastic);
+  nk.position.y = body + shoulder + neck / 2;
+  CANBODY.add(nk);
+  const tri = new THREE.Shape([new THREE.Vector2(-0.0035, 0), new THREE.Vector2(0.0035, 0), new THREE.Vector2(0, 0.005)]);
+  const triM = new THREE.Mesh(new THREE.ShapeGeometry(tri), new THREE.MeshStandardMaterial({ color: 0xc4508a, roughness: 0.5 }));
+  triM.position.set(0, body + shoulder - 0.0068, 0.0170);
+  triM.rotation.x = -0.95;
+  CANBODY.add(triM);
+
+  // 喇叭口瓶盖：侧面带 OPEN / LOCK 字
+  CAPG.position.y = body + shoulder + neck;
+  CANBODY.add(CAPG);
+  const ringTex = texOf(paintCapRing(PINK_CSS));
+  const flare = new THREE.Mesh(new THREE.LatheGeometry([
+    new THREE.Vector2(0.0125, 0), new THREE.Vector2(0.0138, 0.004), new THREE.Vector2(0.0185, 0.0115),
+    new THREE.Vector2(0.0265, 0.0185), new THREE.Vector2(0.0332, 0.0228), new THREE.Vector2(0.0342, 0.0245),
+  ], 96, Math.PI), new THREE.MeshPhysicalMaterial({ map: ringTex, roughness: 0.32, clearcoat: 0.5, side: THREE.DoubleSide }));
+  CAPG.add(flare);
+  const top = new THREE.Mesh(new THREE.LatheGeometry([
+    new THREE.Vector2(0.0342, 0.0245), new THREE.Vector2(0.0318, 0.0256), new THREE.Vector2(0.0316, 0.031),
+    new THREE.Vector2(0.0302, 0.032), new THREE.Vector2(0.0262, 0.032), new THREE.Vector2(0.0246, 0.0302),
+    new THREE.Vector2(0.012, 0.0292), new THREE.Vector2(0.0055, 0.0275), new THREE.Vector2(0.0055, 0.024),
+    new THREE.Vector2(0, 0.024),
+  ], 96), new THREE.MeshPhysicalMaterial({ color: PINK, roughness: 0.32, clearcoat: 0.5, side: THREE.DoubleSide }));
+  CAPG.add(top);
+}
+
+// 台面上的柔和接触阴影
+const shadowTex = cvs(128, 128, (g, w) => {
+  const gr = g.createRadialGradient(w / 2, w / 2, 0, w / 2, w / 2, w / 2);
+  gr.addColorStop(0, 'rgba(40,50,70,.55)'); gr.addColorStop(0.55, 'rgba(40,50,70,.22)'); gr.addColorStop(1, 'rgba(40,50,70,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, w, w);
+});
+const canShadow = new THREE.Mesh(new THREE.PlaneGeometry(0.13, 0.13),
+  new THREE.MeshBasicMaterial({ map: shadowTex, transparent: true, depthWrite: false }));
+canShadow.rotation.x = -Math.PI / 2;
+canShadow.position.set(DIM.home[0], 0.0008, DIM.home[2]);
+MODEL.add(canShadow);
+
+/* ============================================================
+   台盆里的泡沫团
+   ============================================================ */
+const BLOBS = [];
+const basinFoam = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 18, 12), foamMat(), 110);
+basinFoam.frustumCulled = false;
+MODEL.add(basinFoam);
+for (let i = 0; i < 110; i++) {
+  const layer = i < 72 ? 0 : 1;
+  let rr = 0.028 + 0.11 * Math.sqrt(rnd());
+  if (layer) rr *= 0.7;
+  const phi = Math.PI / 2 - 0.35 + rnd() * (Math.PI + 0.7);
+  const x = rr * Math.sin(phi) * B.sx * 0.9, z = rr * Math.cos(phi);
+  const size = (0.011 + 0.014 * rnd()) * (1.25 - rr * 2.5);
+  const reff = Math.hypot(x / B.sx, Math.min(z, 0));
+  BLOBS.push({
+    x, z, size, y: yIn(reff) + size * (layer ? 1.3 : 0.5),
+    th: clamp01(rr / 0.14) * 0.8 + layer * 0.18, out: rnd() * 0.75, ph: rnd() * 6.28,
+  });
+}
+
+/* ============================================================
+   污垢 / 头发 / 小虫 / 管内细菌（都会被泡沫裹走）
+   ============================================================ */
+function germGeo() {
+  const parts = [new THREE.IcosahedronGeometry(1, 2)];
+  const n = 18, up = new V3(0, 1, 0);
+  for (let i = 0; i < n; i++) {
+    const y = 1 - (i + 0.5) / n * 2, rad = Math.sqrt(1 - y * y), a = i * 2.39996;
+    const dir = new V3(Math.cos(a) * rad, y, Math.sin(a) * rad);
+    const q = new THREE.Quaternion().setFromUnitVectors(up, dir);
+    const stalk = new THREE.CylinderGeometry(0.06, 0.1, 0.42, 6).toNonIndexed(); stalk.translate(0, 1.12, 0);
+    const knob = new THREE.SphereGeometry(0.15, 8, 6).toNonIndexed(); knob.translate(0, 1.36, 0);
+    stalk.applyQuaternion(q); knob.applyQuaternion(q);
+    parts.push(stalk, knob);
+  }
+  return mergeGeometries(parts);
+}
+const GERM_GEO = germGeo();
+const GERM_COL = { red: 0xe8435f, green: 0x2fb57c, blue: 0x3d7fe0 };
+const germMat = c => new THREE.MeshStandardMaterial({ color: GERM_COL[c], roughness: 0.45, emissive: GERM_COL[c], emissiveIntensity: 0.15 });
+
+function makeBug() {
+  const g = new THREE.Group();
+  const m = new THREE.MeshStandardMaterial({ color: 0x5a3418, roughness: 0.35, metalness: 0.1 });
+  const leg = new THREE.MeshStandardMaterial({ color: 0x3a2210, roughness: 0.6 });
+  const body = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 10), m); body.scale.set(1, 0.42, 0.62); g.add(body);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.36, 12, 8), m); head.position.x = 1.05; g.add(head);
+  for (const s of [-1, 1]) for (const k of [-0.5, 0.1, 0.6]) {
+    const l = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.0, 5), leg);
+    l.position.set(k, -0.25, s * 0.6); l.rotation.set(s * 1.0, 0, k * 0.6); g.add(l);
+  }
+  for (const s of [-1, 1]) {
+    const a = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 1.4, 4), leg);
+    a.position.set(1.7, 0.15, s * 0.3); a.rotation.set(s * 0.5, 0, -1.2); g.add(a);
+  }
+  return g;
+}
+
+const DIRT = [];
+const DIRT_GROUP = new THREE.Group();
+MODEL.add(DIRT_GROUP);
+const gauss = () => (rnd() + rnd() + rnd() - 1.5) / 1.5;
+{
+  const chunkGeo = new THREE.DodecahedronGeometry(1, 0);
+  const chunkMats = [0x4b2e17, 0x6b4a2a, 0x8a6a45, 0x3a2414].map(c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.9 }));
+  const hairMat = new THREE.MeshStandardMaterial({ color: 0x241a12, roughness: 0.6 });
+  const add = (obj, kind, u, a, rad, dissolve) => {
+    DIRT_GROUP.add(obj);
+    DIRT.push({ obj, kind, u0: u, a, rad0: rad, radIn: DIM.pipe.rIn * rand(0.1, 0.6), push: rand(0.02, 0.09),
+                lag: rand(0.0, 0.05), dissolve, spin: rand(-3, 3), s0: obj.scale.clone() });
+  };
+  for (let i = 0; i < 52; i++) {
+    const o = new THREE.Mesh(chunkGeo, chunkMats[i % 4]);
+    const s = rand(0.0018, 0.0055);
+    o.scale.set(s * rand(0.6, 1.4), s * rand(0.5, 1.0), s * rand(0.6, 1.4));
+    o.rotation.set(rnd() * 6, rnd() * 6, rnd() * 6);
+    add(o, 'chunk', U_BOTTOM + gauss() * 0.22, rand(-Math.PI, Math.PI), DIM.pipe.rIn - s * 0.6, 0.65);
+  }
+  for (let i = 0; i < 9; i++) {
+    const pts = [];
+    for (let k = 0; k < 7; k++) pts.push(new V3(k * 0.005 - 0.015, rand(-0.003, 0.003), rand(-0.003, 0.003)));
+    const o = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 30, 0.00035, 4), hairMat);
+    o.rotation.set(rnd() * 3, rnd() * 3, rnd() * 3);
+    add(o, 'hair', U_BOTTOM + gauss() * 0.16, rand(-Math.PI, Math.PI), DIM.pipe.rIn * 0.8, 0.5);
+  }
+  for (let i = 0; i < 3; i++) {
+    const o = makeBug(); o.scale.setScalar(0.0042);
+    add(o, 'bug', [uAtY(-0.30), U_BOTTOM + 0.02, U_BOTTOM + 0.09][i], [1.2, 1.4, 1.0][i], DIM.pipe.rIn - 0.003, 0.25);
+  }
+  ['green', 'red', 'blue', 'green', 'red'].forEach((c, i) => {
+    const o = new THREE.Mesh(GERM_GEO, germMat(c)); o.scale.setScalar(0.0035);
+    add(o, 'germ', U_BOTTOM + (i - 2) * 0.06, rand(-1, 1) + Math.PI / 2, DIM.pipe.rIn * 0.5, 1);
+  });
+}
+
+/* 管外漂浮的细菌（装饰，静置时一个个爆掉） */
+const GERMS = [];
+const popRingGeo = new THREE.RingGeometry(0.82, 1, 40);
+[
+  [-0.10, -0.30, 0.05, 'red', 0.018], [0.25, -0.13, 0.04, 'blue', 0.016], [0.21, -0.40, 0.06, 'green', 0.015],
+  [-0.07, -0.45, 0.03, 'blue', 0.012], [0.40, -0.33, 0.02, 'red', 0.013], [0.09, -0.50, 0.05, 'green', 0.011],
+  [0.38, -0.52, 0.04, 'blue', 0.014], [-0.15, -0.20, 0.02, 'green', 0.010], [0.075, -0.25, 0.07, 'red', 0.010],
+].forEach(([x, y, z, c, s], i) => {
+  const o = new THREE.Mesh(GERM_GEO, germMat(c));
+  o.position.set(x, y, z);
+  const ring = new THREE.Mesh(popRingGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, depthWrite: false, side: THREE.DoubleSide }));
+  ring.position.copy(o.position);
+  MODEL.add(o, ring);
+  GERMS.push({ o, ring, base: new V3(x, y, z), s, ph: i * 1.7, tp: TL.soak[0] + 0.1 + i * 0.17 });
+});
+
+/* 装饰气泡 */
+const BUBBLES = [];
+[[-0.22, -0.35, 0.06, 0.03], [-0.18, -0.52, 0.02, 0.018], [0.48, -0.25, 0.03, 0.022], [0.46, -0.45, 0.08, 0.012],
+ [-0.30, -0.10, 0.10, 0.014], [0.17, -0.58, 0.05, 0.016], [0.56, -0.08, 0.00, 0.02], [-0.05, -0.58, 0.08, 0.01]]
+.forEach(([x, y, z, r], i) => {
+  const o = new THREE.Mesh(new THREE.SphereGeometry(r, 32, 20), glassMat(0.9));
+  o.position.set(x, y, z); o.renderOrder = 11;
+  MODEL.add(o);
+  BUBBLES.push({ o, base: new V3(x, y, z), ph: i * 2.1 });
+});
+
+/* 流向箭头（原理图里的粉色大箭头） */
+const ARROWS = [];
+{
+  const s = new THREE.Shape();
+  s.moveTo(-0.03, -0.0075); s.lineTo(0.004, -0.0075); s.lineTo(0.004, -0.018); s.lineTo(0.036, 0);
+  s.lineTo(0.004, 0.018); s.lineTo(0.004, 0.0075); s.lineTo(-0.03, 0.0075); s.closePath();
+  const geo = new THREE.ExtrudeGeometry(s, { depth: 0.004, bevelEnabled: true, bevelThickness: 0.0015, bevelSize: 0.0015, bevelSegments: 2 });
+  for (const u of [uAtY(-0.27), (DRAIN_Y + 0.004 + 0.36 + 0.075 * Math.PI + 0.045) / FLOW_L,
+                   (DRAIN_Y + 0.004 + 0.36 + 0.075 * Math.PI * 1.5 + 0.09) / FLOW_L, uAtY(-0.27) + (0.075 * Math.PI * 2 + 0.09 + 0.20) / FLOW_L]) {
+    const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0xff5c9d, emissive: 0xa0204e, emissiveIntensity: 0.4, roughness: 0.4, transparent: true }));
+    const p = FLOW.getPointAt(u), t = FLOW.getTangentAt(u);
+    m.position.set(p.x, p.y, 0.032);
+    m.rotation.z = Math.atan2(t.y, t.x);
+    m.renderOrder = 12;
+    MODEL.add(m);
+    ARROWS.push({ m, u, p, t: t.clone() });
+  }
+}
+
+/* 冲净后的星光 */
+const SPARK_N = 60;
+const sparkGeo = new THREE.BufferGeometry();
+{
+  const pos = new Float32Array(SPARK_N * 3), ph = new Float32Array(SPARK_N), v = new V3();
+  for (let i = 0; i < SPARK_N; i++) {
+    inPipe(rand(0.1, 0.98), rand(-Math.PI, Math.PI), rand(0.024, 0.04), v);
+    pos.set([v.x, v.y, v.z], i * 3); ph[i] = rnd() * 6.28;
+  }
+  sparkGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  sparkGeo.setAttribute('ph', new THREE.BufferAttribute(ph, 1));
+}
+const sparkM = new THREE.ShaderMaterial({
+  uniforms: { uTime, uAmt: { value: 0 }, uScale: { value: innerHeight } },
+  vertexShader: /* glsl */`
+    attribute float ph; uniform float uTime, uAmt, uScale; varying float vA;
+    void main(){
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vA = uAmt * pow(0.5 + 0.5 * sin(uTime * 3.0 + ph * 3.0), 3.0);
+      gl_PointSize = 0.03 * uScale / -mv.z * (0.5 + vA);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: /* glsl */`
+    varying float vA;
+    void main(){
+      vec2 p = gl_PointCoord - 0.5;
+      float s = exp(-abs(p.x) * 40.0) * exp(-abs(p.y) * 6.0) + exp(-abs(p.y) * 40.0) * exp(-abs(p.x) * 6.0) + exp(-dot(p, p) * 60.0);
+      gl_FragColor = vec4(1.0, 1.0, 1.0, s * vA);
+    }`,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+});
+const sparks = new THREE.Points(sparkGeo, sparkM);
+sparks.renderOrder = 13;
+MODEL.add(sparks);
+
+/* ============================================================
+   动画：罐子姿态
+   ============================================================ */
+const HOME  = new V3(DIM.home[0], DIM.home[1] + CAN_H / 2, DIM.home[2]);
+const UP    = HOME.clone().add(new V3(0, 0.10, 0));
+const PRESS = new V3(0, DRAIN_Y + CAN_H / 2 + 0.001, 0);
+const ABOVE = PRESS.clone().add(new V3(0, 0.07, 0));
+const RY0 = 0.35;
+
+function canPose(T, out) {
+  const p = out.p.copy(HOME);
+  let rz = 0, ry = RY0;
+  p.lerpVectors(HOME, UP, ease(seg(T, TL.lift)));
+  const ks = seg(T, TL.shake);
+  if (ks > 0 && ks < 1) {
+    const env = Math.sin(ks * Math.PI);
+    rz += 0.3 * Math.sin(ks * Math.PI * 10) * env;
+    p.y += 0.016 * Math.sin(ks * Math.PI * 20) * env;
+  }
+  const km = ease(seg(T, TL.move));
+  if (km > 0) { p.lerpVectors(UP, ABOVE, km); p.y += Math.sin(km * Math.PI) * 0.08; rz = Math.PI * km; ry = lerp(RY0, 0, km); }
+  const kp = seg(T, TL.press);
+  if (kp > 0) p.lerpVectors(ABOVE, PRESS, ease(kp));
+  if (T > TL.press[1] && T < TL.back[0]) p.y -= 0.0015 * Math.abs(Math.sin((T - TL.press[1]) * 5));
+  const kb = seg(T, TL.back);
+  if (kb > 0) {
+    if (kb < 0.25) { p.lerpVectors(PRESS, ABOVE, ease(kb / 0.25)); rz = Math.PI; ry = 0; }
+    else if (kb < 0.8) { const k = ease((kb - 0.25) / 0.55); p.lerpVectors(ABOVE, UP, k); p.y += Math.sin(k * Math.PI) * 0.08; rz = Math.PI * (1 - k); ry = lerp(0, RY0, k); }
+    else { p.lerpVectors(UP, HOME, ease((kb - 0.8) / 0.2)); rz = 0; ry = RY0; }
+  }
+  out.rz = rz; out.ry = ry;
+  out.cap = Math.PI / 2 * ease(seg(T, TL.twist)) * (1 - ease(seg(T, TL.unTwist)));
+  return out;
+}
+
+/* ============================================================
+   机位 + 自动运镜
+   ============================================================ */
+export const VIEWS = {
+  full:    { name: '全景',   p: [0.42, 0.10, 1.55], t: [0.05, -0.22, -0.05] },
+  product: { name: '产品',   p: [-0.27, 0.20, 0.40], t: [-0.45, 0.14, -0.17] },
+  basin:   { name: '台盆',   p: [0.14, 0.17, 0.66], t: [0.0, -0.05, -0.03] },
+  pipe:    { name: '存水弯', p: [0.26, -0.30, 0.98], t: [0.15, -0.40, 0.0] },
+};
+const CAM_KEYS = [[0, 'product'], [2.5, 'product'], [3.7, 'basin'], [5.2, 'basin'], [6.6, 'pipe'], [9.0, 'pipe'],
+                  [10.2, 'full'], [12.6, 'full'], [13.8, 'pipe'], [16.2, 'pipe'], [17.4, 'full']];
+function camAt(T, P, Tg) {
+  let i = 0;
+  while (i < CAM_KEYS.length - 1 && T >= CAM_KEYS[i + 1][0]) i++;
+  const a = VIEWS[CAM_KEYS[i][1]], b = VIEWS[(CAM_KEYS[i + 1] || CAM_KEYS[i])[1]];
+  const span = CAM_KEYS[i + 1] ? CAM_KEYS[i + 1][0] - CAM_KEYS[i][0] : 1;
+  const k = CAM_KEYS[i + 1] ? ease(clamp01((T - CAM_KEYS[i][0]) / span)) : 0;
+  P.set(lerp(a.p[0], b.p[0], k), lerp(a.p[1], b.p[1], k), lerp(a.p[2], b.p[2], k));
+  Tg.set(lerp(a.t[0], b.t[0], k), lerp(a.t[1], b.t[1], k), lerp(a.t[2], b.t[2], k));
+}
+
+let flyFrom = null, flyTo = null, flyT = 0;
+function goView(name) {
+  const v = VIEWS[name];
+  flyFrom = { p: camera.position.clone(), t: controls.target.clone() };
+  flyTo = { p: new V3(...v.p), t: new V3(...v.t) };
+  flyT = 0;
+  setAutoCam(false);
+}
+camera.position.set(...VIEWS.full.p);
+controls.target.set(...VIEWS.full.t);
+
+/* ============================================================
+   evaluate(T)：把整个场景摆到时间 T 的样子
+   ============================================================ */
+const pose = { p: new V3() };
+const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new V3(), _v = new V3();
+
+function evaluate(T, time) {
+  uTime.value = time;
+
+  /* 罐子 */
+  canPose(T, pose);
+  CAN.position.copy(pose.p);
+  CAN.rotation.set(0, pose.ry, pose.rz);
+  CAPG.rotation.y = pose.cap;
+  const lift = CAN.position.y - HOME.y;
+  canShadow.visible = Math.abs(CAN.position.x - HOME.x) < 0.05;
+  canShadow.material.opacity = clamp01(1 - lift / 0.08);
+
+  /* 进度量 */
+  const g      = ease(seg(T, TL.basin));
+  const head   = 1 - (1 - seg(T, TL.foam)) ** 1.6;
+  const soak   = seg(T, TL.soak);
+  const water  = ease(seg(T, TL.water));
+  const wTail  = ease(seg(T, TL.waterTail));
+  const outB   = seg(T, TL.basinOut);
+
+  /* 管内泡沫 / 清水 / 污垢膜 / 扫光 */
+  foamTubeM.uniforms.uHead.value = head;
+  foamTubeM.uniforms.uTail.value = water;
+  foamTube.visible = head > 0.001 && water < 0.999;
+  foamHead.visible = head > 0.001 && head < 0.999 && head > water;
+  if (foamHead.visible) FLOW.getPointAt(head, foamHead.position);
+  waterTubeM.uniforms.uHead.value = water;
+  waterTubeM.uniforms.uTail.value = wTail;
+  waterTube.visible = water > 0.001 && wTail < 0.999;
+  grimeM.uniforms.uClean.value = water > 0.001 ? water : -1;
+  grimeM.uniforms.uDirt.value = 1 - 0.55 * soak;
+  glassM.uniforms.uSweep.value = T > TL.shine[0] ? lerp(-0.1, 1.15, seg(T, TL.shine)) : -9;
+  sparkM.uniforms.uAmt.value = sstep(seg(T, [16.3, 17.0]));
+
+  /* 水柱 */
+  const ksIn = seg(T, [TL.stream[0], TL.stream[0] + 0.3]), ksOut = seg(T, [TL.stream[1] - 0.3, TL.stream[1]]);
+  stream.visible = ksIn > 0 && ksOut < 1;
+  if (stream.visible) {
+    const top = SPOUT_TIP.y - STREAM_LEN * ksOut, len = STREAM_LEN * (ksIn - ksOut);
+    stream.scale.set(1, Math.max(len, 1e-4), 1);
+    stream.position.set(0, top - len / 2, SPOUT_TIP.z);
+  }
+
+  /* 台盆泡沫团 */
+  BLOBS.forEach((b, i) => {
+    let s = b.size * sstep(seg(g, [b.th, b.th + 0.18]));
+    s *= (1 - 0.18 * soak) * (1 + 0.05 * Math.sin(time * 2 + b.ph));
+    s *= 1 - sstep(seg(outB, [b.out, b.out + 0.25]));
+    _s.setScalar(Math.max(s, 1e-5));
+    _v.set(b.x, b.y - (1 - Math.min(1, s / b.size)) * b.size * 0.4, b.z);
+    basinFoam.setMatrixAt(i, _m4.compose(_v, _q.identity(), _s));
+  });
+  basinFoam.instanceMatrix.needsUpdate = true;
+  basinFoam.visible = g > 0 && outB < 1;
+
+  /* 管内污垢：泡沫前沿推一下 → 浸泡分解 → 清水冲走 */
+  for (const d of DIRT) {
+    let u = d.u0, rad = d.rad0, s = 1, spin = 0;
+    if (head > d.u0) {
+      const k = clamp01((head - d.u0) / 0.08);
+      u = d.u0 + d.push * ease(k);
+      rad = lerp(d.rad0, d.radIn, k);
+      spin = k;
+    }
+    if (d.kind === 'germ') s *= 1 - sstep(seg(soak, [d.u0 % 0.5, d.u0 % 0.5 + 0.3]));
+    else s *= 1 - d.dissolve * soak;
+    if (water > u - 0.01 && water > 0.001) { u = Math.max(u, water - d.lag); spin = 2; }
+    s *= 1 - sstep(seg(u, [0.88, 0.97]));
+    if (wTail > u) s = 0;
+    d.obj.visible = s > 0.01;
+    if (!d.obj.visible) continue;
+    inPipe(u, d.a, rad, d.obj.position);
+    d.obj.scale.copy(d.s0).multiplyScalar(s);
+    if (spin) d.obj.rotation.y = d.spin * time * spin * 0.5;
+  }
+
+  /* 管外细菌：飘 → 静置时爆掉 */
+  for (const gm of GERMS) {
+    const k = seg(T, [gm.tp, gm.tp + 0.4]);
+    const s = k < 0.35 ? 1 + 0.3 * (k / 0.35) : 1.3 * (1 - (k - 0.35) / 0.65);
+    gm.o.visible = s > 0.01;
+    gm.o.position.copy(gm.base).y += 0.004 * Math.sin(time * 1.3 + gm.ph);
+    gm.o.rotation.set(time * 0.3 + gm.ph, time * 0.4, 0);
+    gm.o.scale.setScalar(gm.s * Math.max(s, 0.0001));
+    const kr = clamp01((k - 0.3) / 0.7);
+    gm.ring.visible = kr > 0 && kr < 1;
+    gm.ring.quaternion.copy(camera.quaternion);
+    gm.ring.scale.setScalar(gm.s * (1 + 2.5 * kr));
+    gm.ring.material.opacity = (1 - kr) * 0.9;
+  }
+  for (const b of BUBBLES) b.o.position.copy(b.base).y += 0.006 * Math.sin(time * 0.8 + b.ph);
+
+  /* 箭头：泡沫阶段粉色，冲水阶段蓝色 */
+  for (const a of ARROWS) {
+    const foamOn = clamp01((head - a.u) / 0.04) * (1 - seg(T, [TL.back[0], TL.back[0] + 0.6]));
+    const waterOn = clamp01((water - a.u) / 0.04) * (1 - clamp01((wTail - a.u) / 0.04));
+    const on = Math.max(foamOn, waterOn);
+    a.m.visible = on > 0.01;
+    if (!a.m.visible) continue;
+    const isW = waterOn > foamOn;
+    a.m.material.color.setHex(isW ? 0x49a7ff : 0xff5c9d);
+    a.m.material.emissive.setHex(isW ? 0x134a8a : 0xa0204e);
+    a.m.material.opacity = on;
+    const bob = 0.006 * Math.sin(time * 5);
+    a.m.position.set(a.p.x + a.t.x * bob, a.p.y + a.t.y * bob, 0.032);
+  }
+
+  /* 文字说明 */
+  let si = 0;
+  while (si < STEPS.length - 1 && T >= STEPS[si + 1][0]) si++;
+  let cap = STEPS[si][1];
+  if (T >= TL.soak[0] && T < TL.stream[0]) {
+    const rem = Math.round(1800 * (1 - soak));
+    cap += `　⏱ ${String(Math.floor(rem / 60)).padStart(2, '0')}:${String(rem % 60).padStart(2, '0')}`;
+  }
+  UI.setStep(si, cap, T);
+}
+
+/* ============================================================
+   播放控制 + 界面
+   ============================================================ */
+const state = { T: 0, playing: false, autoCam: true, blend: 1, blendFrom: null };
+const UI = window.__DRAIN_UI;
+const _cp = new V3(), _ct = new V3();
+
+function play(fromStart) {
+  if (fromStart || state.T >= TL.end) state.T = 0;
+  state.playing = true;
+  state.blend = 0;
+  state.blendFrom = { p: camera.position.clone(), t: controls.target.clone() };
+  flyTo = null;
+  UI.setPlaying(true);
+}
+function pause() { state.playing = false; UI.setPlaying(false); }
+function setT(T) { state.T = Math.max(0, Math.min(TL.end, T)); }
+function setAutoCam(v) { state.autoCam = v; UI.setAutoCam(v); }
+
+UI.init({
+  steps: STEPS, end: TL.end, views: VIEWS,
+  onPlay: () => state.playing ? pause() : play(false),
+  onReplay: () => play(true),
+  onReset: () => { pause(); setT(0); goView('full'); },
+  onScrub: T => { pause(); setT(T); },
+  onStep: T => { setT(T); play(false); state.blend = 1; },
+  onView: goView,
+  onAutoCam: v => { setAutoCam(v); if (v && state.playing) { state.blend = 0; state.blendFrom = { p: camera.position.clone(), t: controls.target.clone() }; } },
+  onBg: dark => { scene.background = dark ? BG.dark : BG.light; },
+  onExport: () => {
+    const save = { p: CAN.position.clone(), r: CAN.rotation.clone() };
+    CAN.position.set(0, 0, 0); CAN.rotation.set(0, 0, 0);
+    new GLTFExporter().parse(CAN, buf => {
+      CAN.position.copy(save.p); CAN.rotation.copy(save.r);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([buf], { type: 'model/gltf-binary' }));
+      a.download = 'hyper-clean-drain-cleaner.glb'; a.click();
+      UI.exportDone(true);
+    }, err => { console.error(err); UI.exportDone(false); }, { binary: true });
+  },
+});
+
+// 用户一拖视角，就交还手动控制
+controls.addEventListener('start', () => { if (state.playing && state.autoCam) setAutoCam(false); flyTo = null; });
+
+// 点罐子 = 播放
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+let downXY = null;
+const hitCan = e => {
+  ndc.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  ray.setFromCamera(ndc, camera);
+  return ray.intersectObject(CAN, true).length > 0;
+};
+renderer.domElement.addEventListener('pointerdown', e => { downXY = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!downXY || Math.hypot(e.clientX - downXY[0], e.clientY - downXY[1]) > 5) return;
+  if (hitCan(e)) { if (!state.playing) { setAutoCam(true); play(false); } else pause(); }
+});
+let hoverTick = 0;
+renderer.domElement.addEventListener('pointermove', e => {
+  if (++hoverTick % 3) return;
+  renderer.domElement.style.cursor = hitCan(e) ? 'pointer' : '';
+});
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.code === 'Space') { e.preventDefault(); state.playing ? pause() : play(false); }
+});
+
+/* 主循环 */
+const clock = new THREE.Clock();
+function tick() {
+  const dt = Math.min(clock.getDelta(), 0.1);
+  const time = clock.elapsedTime;
+  if (state.playing) {
+    state.T += dt;
+    if (state.T >= TL.end) { state.T = TL.end; pause(); }
+  }
+  if (state.playing && state.autoCam) {
+    camAt(state.T, _cp, _ct);
+    state.blend = Math.min(1, state.blend + dt / 1.2);
+    if (state.blend < 1 && state.blendFrom) {
+      const k = ease(state.blend);
+      _cp.lerpVectors(state.blendFrom.p, _cp, k);
+      _ct.lerpVectors(state.blendFrom.t, _ct, k);
+    }
+    camera.position.copy(_cp);
+    controls.target.copy(_ct);
+  } else if (flyTo) {
+    flyT = Math.min(1, flyT + dt * 1.4);
+    const e = ease(flyT);
+    camera.position.lerpVectors(flyFrom.p, flyTo.p, e);
+    controls.target.lerpVectors(flyFrom.t, flyTo.t, e);
+    if (flyT >= 1) flyTo = null;
+  }
+  evaluate(state.T, time);
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+}
+
+/* URL 参数：?t=秒 定格 · ?v=机位 · ?ui=0 无界面 · ?play=1 自动播放 */
+{
+  const q = new URLSearchParams(location.search);
+  if (q.has('t')) setT(parseFloat(q.get('t')));
+  if (q.get('v') && VIEWS[q.get('v')]) {
+    camera.position.set(...VIEWS[q.get('v')].p); controls.target.set(...VIEWS[q.get('v')].t);
+  } else if (q.has('t')) { camAt(state.T, camera.position, controls.target); }
+  if (q.get('ui') === '0') document.body.classList.add('uihide');
+  if (q.get('play') === '1') play(true);
+}
+tick();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  sparkM.uniforms.uScale.value = innerHeight;
+});
+
+window.DRAIN = { THREE, scene, camera, controls, renderer, DIM, TL, VIEWS, CAN, FLOW, state, setT, play, pause, goView, evaluate };
