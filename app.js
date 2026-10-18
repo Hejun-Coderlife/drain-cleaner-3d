@@ -620,7 +620,8 @@ const OVF = { p: new V3(-0.08, -0.06, SINK.zb), n: new V3(0, 0, 1) };
 /* 溢水通道：尾管背面三通 → 水槽底下 → 贴着水槽后壁上去 → 穿过后壁到溢水口
    被水槽挡住，所以像原理图一样用"透视"画法：放进不透明队列、不做深度测试，
    画在陶瓷/橱柜之后、罐子和泡沫之前 → 能透过水槽看见，但不会盖住罐子 */
-const xray = m => Object.assign(m, { transparent: false, depthTest: false, depthWrite: false, blending: THREE.CustomBlending });
+const xray = m => Object.assign(m, { transparent: false, depthTest: false, depthWrite: false, blending: THREE.CustomBlending,
+  blendSrcAlpha: THREE.ZeroFactor, blendDstAlpha: THREE.OneFactor });     // 不改画布 alpha，否则导出视频时会和黑底混成灰色
 const CHAN = new THREE.CatmullRomCurve3([
   [0, -0.305, -0.004], [-0.015, -0.300, -0.08], [-0.05, -0.292, -0.19], [-0.08, -0.268, -0.262],
   [-0.08, -0.20, -0.268], [-0.08, -0.10, -0.262], [-0.08, -0.07, -0.245], [-0.08, -0.06, -0.222], [-0.08, -0.06, SINK.zb + 0.002],
@@ -1189,7 +1190,7 @@ function tick() {
   requestAnimationFrame(tick);
 }
 
-/* URL 参数：?t=秒 定格 · ?v=机位 · ?cp/ct=自定机位 · ?ui=0 无界面 · ?play=1 自动播放 */
+/* URL 参数：?t=秒 定格 · ?v=机位 · ?cp/ct=自定机位 · ?ui=0 无界面 · ?play=1 自动播放 · ?rec=1 录制模式（tools/record.mjs 逐帧驱动） */
 {
   const q = new URLSearchParams(location.search);
   if (q.has('t')) setT(parseFloat(q.get('t')));
@@ -1201,7 +1202,8 @@ function tick() {
   if (q.get('ui') === '0') document.body.classList.add('uihide');
   if (q.get('play') === '1') play(true);
 }
-tick();
+const REC = new URLSearchParams(location.search).get('rec') === '1';
+if (!REC) tick();
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
@@ -1210,4 +1212,13 @@ addEventListener('resize', () => {
   sparkM.uniforms.uScale.value = innerHeight;
 });
 
-window.DRAIN = { THREE, scene, camera, controls, renderer, DIM, TL, VIEWS, CAN, FLOW, state, setT, play, pause, goView, evaluate };
+/* 录制：把场景摆到时间 T（自动运镜机位），渲染一帧并返回 JPEG */
+function frame(T) {
+  camAt(T, camera.position, controls.target);
+  camera.lookAt(controls.target);
+  evaluate(T, T);
+  renderer.render(scene, camera);
+  return renderer.domElement.toDataURL('image/jpeg', 0.95);
+}
+
+window.DRAIN = { THREE, scene, camera, controls, renderer, DIM, TL, VIEWS, CAN, FLOW, state, setT, play, pause, goView, evaluate, frame };
