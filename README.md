@@ -4,7 +4,7 @@ Three.js 单页（index.html + app.js），无构建步骤，格式同 hymn-stor
 
 - 本地预览需要起服务器（ES module）：`python3 -m http.server 8901`，打开 http://localhost:8901
 - 点罐子 / ▶ 播放约 20 秒演示：扭 OPEN → 摇匀 → 倒扣按压 → 泡沫灌满存水弯、顺溢水通道从侧面小口挤出 → 静置 30 分钟 → 冲水 → 洁净
-- 场景：白色围裙式厨房水槽 + 大理石台面 + 黄铜鹅颈龙头 + 浅蓝橱柜；P 形存水弯穿后墙；溢水通道用"透视"画法
+- 场景：剖开的椭圆台盆 + 大理石台面 + 镀铬龙头；P 形存水弯穿后墙；溢水口背后的溢水通道用"透视"画法
 - 罐子（6.5 × 22 cm）的轮廓和贴图都取自产品正面图：
   `python3 tools/make_can.py <产品图.png> can.png` 生成展开贴图 `can.png`，并打印 `CAN_PROFILE` 贴进 app.js
   （label.js 是早期按视频手绘的示意稿，已不再使用）

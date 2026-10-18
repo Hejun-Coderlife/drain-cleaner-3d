@@ -9,18 +9,16 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 
 /* ---------- 尺寸表 ---------- */
 export const DIM = {
-  sink:    { w: 0.76, d: 0.47, h: 0.27, wall: 0.035, apron: 0.045, top: -0.002, r: 0.035, drain: 0.036 },   // 围裙式水槽（外形）
-  counter: { w: 1.60, back: -0.48, t: 0.03 },
-  cab:     { w: 0.92, y: -0.86, shelf: -0.80, back: -0.47 },                // 浅蓝橱柜（中间水槽柜敞开）
-  pipe:    { r: 0.022, rIn: 0.0185, top: -0.275 },                  // 透明下水管（40mm 管）
-  home:    [-0.58, 0, -0.15],                                               // 罐子平时站在台面左侧
+  basin:   { R: 0.20, D: 0.13, t: 0.012, sx: 1.35, drain: 0.021 },   // 椭圆台盆：长轴 = R × sx
+  counter: { w: 1.30, d: 0.44, t: 0.03 },
+  pipe:    { r: 0.022, rIn: 0.0185, top: -0.20 },                  // 透明下水管（40mm 管）
+  home:    [-0.46, 0, -0.17],                                      // 罐子平时站在台面左侧
 };
-/* P 形存水弯：U 弯圆心高度 yU、半径 R，上升到 yE 后 90° 转弯（半径 rE）水平穿进后墙 */
-const TRAP = { R: 0.075, x: 0.15, yU: -0.56, yE: -0.47, rE: 0.06 };
+/* P 形存水弯：U 弯圆心高度 yU、半径 R，上升到 yE 后 90° 转弯（半径 rE）水平穿进后墙（zEnd） */
+const TRAP = { R: 0.075, x: 0.15, yU: -0.36, yE: -0.27, rE: 0.06, zEnd: -0.36 };
 TRAP.yOut = TRAP.yE + TRAP.rE;
 
 /* 罐子：产品图里罐身直径 459px = 6.5cm，罐高 1533px ≈ 21.7cm（官方标 22cm） */
@@ -80,7 +78,6 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 renderer.setSize(innerWidth, innerHeight);
 renderer.toneMapping = THREE.NeutralToneMapping;
 renderer.toneMappingExposure = 1.0;
-renderer.localClippingEnabled = true;
 document.getElementById('app').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -115,14 +112,9 @@ scene.add(MODEL);
 const M = {
   chrome:  new THREE.MeshStandardMaterial({ color: 0xe8eaee, metalness: 1, roughness: 0.14 }),
   brass:   new THREE.MeshStandardMaterial({ color: 0xd8b679, metalness: 1, roughness: 0.25 }),
-  ceramic: new THREE.MeshPhysicalMaterial({ color: 0xfbfbfb, roughness: 0.18, clearcoat: 0.7, clearcoatRoughness: 0.2 }),
-  gold:    new THREE.MeshStandardMaterial({ color: 0xc9a066, metalness: 1, roughness: 0.32 }),
-  cab:     new THREE.MeshStandardMaterial({ color: 0xb6d4da, roughness: 0.55 }),
-  cabIn:   new THREE.MeshStandardMaterial({ color: 0xa4c3ca, roughness: 0.7 }),
+  ceramic: new THREE.MeshPhysicalMaterial({ color: 0xfbfbfb, roughness: 0.18, clearcoat: 0.7, clearcoatRoughness: 0.2, side: THREE.DoubleSide }),
+  cut:     new THREE.MeshStandardMaterial({ color: 0xc4c8cf, roughness: 0.7, side: THREE.DoubleSide }),
 };
-M.ceramicIn = M.ceramic.clone();
-M.ceramicIn.side = THREE.BackSide;
-M.ceramicIn.clippingPlanes = [new THREE.Plane(new V3(0, -1, 0), DIM.sink.top)];   // 内腔只留台面以下
 
 /* ---------- 共享 shader 片段 ---------- */
 const VS_COMMON = /* glsl */`
@@ -273,20 +265,19 @@ function grimeMat() {
 }
 
 /* ============================================================
-   台面 + 白色围裙式（农家式）厨房水槽 + 黄铜鹅颈龙头 + 浅蓝橱柜
+   台面 + 剖开的椭圆台盆
    ============================================================ */
-const S = DIM.sink;
-const SINK = { x: S.w / 2 - S.wall, zb: -S.d / 2 + S.wall, zf: S.d / 2 - S.apron };   // 内腔边界
-const FLOOR_Y = S.top - S.h + S.wall;      // 槽底
-const DRAIN_Y = FLOOR_Y;
-const SINK_BOT = S.top - S.h;              // 水槽外底
+const B = DIM.basin;
+function yIn(r)  { const k = clamp01(r / B.R);         return -B.D * Math.pow(1 - Math.pow(k, 2.5), 0.55); }
+function yOut(r) { const k = clamp01(r / (B.R + B.t)); return -(B.D + B.t) * Math.pow(1 - Math.pow(k, 2.5), 0.55); }
+const DRAIN_Y = yIn(B.drain);
 
 function marbleTex() {
   const t = cvs(1024, 1024, (g, w, h) => {
-    g.fillStyle = '#f2f2f0'; g.fillRect(0, 0, w, h);
-    for (let i = 0; i < 14; i++) {
-      g.strokeStyle = `rgba(140,140,150,${0.06 + rnd() * 0.14})`;
-      g.lineWidth = 1 + rnd() * 4;
+    g.fillStyle = '#f7f7f5'; g.fillRect(0, 0, w, h);
+    for (let i = 0; i < 9; i++) {
+      g.strokeStyle = `rgba(150,150,160,${0.08 + rnd() * 0.12})`;
+      g.lineWidth = 1 + rnd() * 3;
       g.beginPath(); g.moveTo(rnd() * w, 0);
       g.bezierCurveTo(rnd() * w, h * 0.3, rnd() * w, h * 0.7, rnd() * w, h);
       g.stroke();
@@ -297,97 +288,66 @@ function marbleTex() {
 }
 
 {
-  // 台面：水槽内腔开口处挖掉，前沿和水槽围裙齐平
-  const { w, back, t } = DIM.counter, r = S.r, zf = S.d / 2;
+  const { w, d, t } = DIM.counter;
+  const rx = B.R * B.sx, rz = B.R;
   const s = new THREE.Shape();
-  s.moveTo(-w / 2, back); s.lineTo(w / 2, back); s.lineTo(w / 2, zf); s.lineTo(SINK.x, zf);
-  s.lineTo(SINK.x, SINK.zb + r);
-  s.absarc(SINK.x - r, SINK.zb + r, r, 0, -Math.PI / 2, true);
-  s.lineTo(-SINK.x + r, SINK.zb);
-  s.absarc(-SINK.x + r, SINK.zb + r, r, -Math.PI / 2, -Math.PI, true);
-  s.lineTo(-SINK.x, zf); s.lineTo(-w / 2, zf); s.closePath();
+  s.moveTo(-w / 2, 0); s.lineTo(-rx, 0);
+  for (let i = 1; i <= 64; i++) { const a = Math.PI + Math.PI * i / 64; s.lineTo(rx * Math.cos(a), rz * Math.sin(a)); }
+  s.lineTo(w / 2, 0); s.lineTo(w / 2, -d); s.lineTo(-w / 2, -d); s.closePath();
   const geo = new THREE.ExtrudeGeometry(s, { depth: t, bevelEnabled: false });
-  geo.rotateX(Math.PI / 2);            // 形状 y → 世界 z，挤出方向 → 向下
-  MODEL.add(new THREE.Mesh(geo, new THREE.MeshPhysicalMaterial({ map: marbleTex(), roughness: 0.3, clearcoat: 0.35 })));
+  geo.rotateX(Math.PI / 2);            // 形状 y → 世界 z（向后为负），挤出方向 → 向下
+  const mat = new THREE.MeshPhysicalMaterial({ map: marbleTex(), roughness: 0.25, clearcoat: 0.4 });
+  MODEL.add(new THREE.Mesh(geo, mat));
 
-  // 水槽内腔：圆角盒子只渲染背面 = 看到的是内壁；高出台面的部分裁掉
-  const hIn = S.top - FLOOR_Y + 0.06;
-  const inner = new THREE.Mesh(new RoundedBoxGeometry(SINK.x * 2, hIn, SINK.zf - SINK.zb, 6, r), M.ceramicIn);
-  inner.position.set(0, FLOOR_Y + hIn / 2, (SINK.zf + SINK.zb) / 2);
-  MODEL.add(inner);
-  // 外壳（不要顶面和前面：前面由围裙挡住，顶面是开口）
-  const hide = new THREE.MeshBasicMaterial({ visible: false });
-  const shell = new THREE.Mesh(new THREE.BoxGeometry(S.w, S.h, SINK.zf + S.d / 2),
-    [M.ceramic, M.ceramic, hide, M.ceramic, hide, M.ceramic]);
-  shell.position.set(0, S.top - S.h / 2, (SINK.zf - S.d / 2) / 2);
-  MODEL.add(shell);
-  // 围裙前脸
-  const apron = new THREE.Mesh(new RoundedBoxGeometry(S.w, S.h, S.apron, 4, 0.008), M.ceramic);
-  apron.position.set(0, S.top - S.h / 2, SINK.zf + S.apron / 2);
-  MODEL.add(apron);
-
-  // 不锈钢提篮下水口
-  const holes = cvs(256, 256, (g, w) => {
-    g.fillStyle = '#c9ccd1'; g.fillRect(0, 0, w, w);
-    g.fillStyle = '#2c2e33';
-    for (let k = 1; k <= 4; k++) for (let i = 0; i < k * 8; i++) {
-      const a = i / (k * 8) * Math.PI * 2, rr = k * 26;
-      g.beginPath(); g.arc(w / 2 + rr * Math.cos(a), w / 2 + rr * Math.sin(a), 6, 0, Math.PI * 2); g.fill();
-    }
-  });
-  const basket = new THREE.Mesh(new THREE.CircleGeometry(S.drain, 48),
-    new THREE.MeshStandardMaterial({ map: holes, metalness: 0.9, roughness: 0.35 }));
-  basket.rotation.x = -Math.PI / 2; basket.position.y = FLOOR_Y - 0.004;
-  MODEL.add(basket);
-  const flange = new THREE.Mesh(new THREE.TorusGeometry(S.drain + 0.006, 0.0055, 12, 64), M.chrome);
-  flange.rotation.x = Math.PI / 2; flange.scale.z = 0.5; flange.position.y = FLOOR_Y + 0.0005;
-  MODEL.add(flange);
-
-  // 黄铜鹅颈抽拉龙头
-  const fz = -0.31;
-  const add = (geo, x, y, z, mat = M.gold) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); MODEL.add(m); return m; };
-  add(new THREE.CylinderGeometry(0.03, 0.032, 0.012, 40), 0, 0.006, fz);
-  add(new THREE.CylinderGeometry(0.019, 0.021, 0.17, 40), 0, 0.097, fz);
-  add(new THREE.CylinderGeometry(0.0215, 0.0215, 0.008, 40), 0, 0.10, fz);
-  add(new THREE.CylinderGeometry(0.0205, 0.0205, 0.012, 40), 0, 0.182, fz);
-  const hub = add(new THREE.CylinderGeometry(0.011, 0.011, 0.026, 24), 0.028, 0.15, fz);
-  hub.rotation.z = Math.PI / 2;
-  const lever = add(new THREE.CylinderGeometry(0.0045, 0.0055, 0.075, 16), 0.046, 0.185, fz);
-  lever.rotation.z = -0.25;
-  const neck = new THREE.CatmullRomCurve3([
-    new V3(0, 0.18, fz), new V3(0, 0.30, fz), new V3(0, 0.375, fz + 0.03),
-    new V3(0, 0.395, fz + 0.10), new V3(0, 0.37, fz + 0.165), new V3(0, 0.335, fz + 0.19),
-  ]);
-  MODEL.add(new THREE.Mesh(new THREE.TubeGeometry(neck, 64, 0.012, 20), M.gold));
-  add(new THREE.CylinderGeometry(0.0145, 0.0135, 0.075, 32), 0, 0.30, fz + 0.19);
-  add(new THREE.CylinderGeometry(0.011, 0.011, 0.004, 24), 0, 0.2605, fz + 0.19, M.chrome);
-
-  // 浅蓝橱柜：中间水槽柜敞开（看得到管道），两侧柜门 + 黄铜拉手
-  const C = DIM.cab, H = -0.03 - C.y, dep = S.d / 2 - C.back;
-  const box = (w, h, d, x, y, z, mat = M.cab) => add(new THREE.BoxGeometry(w, h, d), x, y, z, mat);
-  box(C.w, H, 0.02, 0, C.y + H / 2, C.back, M.cabIn);
-  for (const sg of [-1, 1]) box(0.02, H, dep, sg * C.w / 2, C.y + H / 2, C.back + dep / 2, M.cabIn);
-  box(C.w, 0.02, dep, 0, C.shelf - 0.01, C.back + dep / 2, M.cabIn);
-  box(DIM.counter.w, C.shelf - C.y, 0.02, 0, (C.shelf + C.y) / 2, S.d / 2 - 0.04, M.cabIn);
-  const sw = (DIM.counter.w - C.w) / 2;
-  for (const sg of [-1, 1]) {
-    const x = sg * (C.w / 2 + sw / 2);
-    box(sw, H, dep, x, C.y + H / 2, C.back + dep / 2);
-    box(sw - 0.03, H - 0.04, 0.012, x, C.y + H / 2 + 0.01, S.d / 2 + 0.006);
-    box(sw - 0.09, H - 0.12, 0.006, x, C.y + H / 2 + 0.01, S.d / 2 + 0.014, M.cabIn);
-    const hx = sg * (C.w / 2 + 0.05);
-    const bar = add(new THREE.CylinderGeometry(0.0055, 0.0055, 0.14, 16), hx, -0.16, S.d / 2 + 0.04);
-    for (const dy of [-0.06, 0.06]) {
-      const st = add(new THREE.CylinderGeometry(0.004, 0.004, 0.028, 12), hx, -0.16 + dy, S.d / 2 + 0.027);
-      st.rotation.x = Math.PI / 2;
-    }
-    bar.castShadow = false;
+  // 台盆：闭合截面（内壁 → 盆沿 → 外壁 → 下水口）车削半圈，只留后半边
+  const prof = [], N = 44;
+  for (let i = 0; i <= N; i++) { const r = B.drain + (B.R - B.drain) * Math.sin(i / N * Math.PI / 2); prof.push(new THREE.Vector2(r, yIn(r))); }
+  for (let i = N; i >= 0; i--) { const r = B.drain + (B.R + B.t - B.drain) * Math.sin(i / N * Math.PI / 2); prof.push(new THREE.Vector2(r, yOut(r))); }
+  prof.push(prof[0].clone());
+  const bowl = new THREE.LatheGeometry(prof, 120, Math.PI / 2, Math.PI);
+  bowl.scale(B.sx, 1, 1);
+  bowl.computeVertexNormals();
+  MODEL.add(new THREE.Mesh(bowl, M.ceramic));
+  // 两个剖切面（灰色截面，和原理图一样）
+  for (const sgn of [1, -1]) {
+    const sh = new THREE.Shape(prof.map(p => new THREE.Vector2(sgn * p.x * B.sx, p.y)));
+    MODEL.add(new THREE.Mesh(new THREE.ShapeGeometry(sh), M.cut));
   }
-  // 横管穿墙处的装饰圈
-  const esc = add(new THREE.CylinderGeometry(0.036, 0.036, 0.008, 40), TRAP.x, TRAP.yOut, C.back + 0.014, M.chrome);
-  esc.rotation.x = Math.PI / 2;
+  // 台面剖切面也上一道灰
+  const cutFace = new THREE.Mesh(new THREE.PlaneGeometry(w / 2 - rx, t), M.cut);
+  for (const sgn of [1, -1]) {
+    const m = cutFace.clone();
+    m.position.set(sgn * (rx + (w / 2 - rx) / 2), -t / 2, 0.0005);
+    MODEL.add(m);
+  }
+
+  // 下水口不锈钢圈（后半圈）
+  const ring = new THREE.Mesh(new THREE.RingGeometry(B.drain - 0.002, B.drain + 0.012, 48, 1, 0, Math.PI), M.chrome);
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.y = DRAIN_Y + 0.0015;
+  MODEL.add(ring);
+  const lip = new THREE.Mesh(new THREE.CylinderGeometry(B.drain, B.drain, 0.014, 40, 1, true, Math.PI / 2, Math.PI), M.chrome);
+  lip.position.y = DRAIN_Y - 0.006;
+  MODEL.add(lip);
+
+  // 水龙头
+  const fz = -0.30;
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.024, 0.026, 0.05, 40), M.chrome);
+  base.position.set(0, 0.025, fz); MODEL.add(base);
+  const riser = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.016, 0.13, 32), M.chrome);
+  riser.position.set(0, 0.11, fz); MODEL.add(riser);
+  const spoutCurve = new THREE.CatmullRomCurve3([
+    new V3(0, 0.165, fz), new V3(0, 0.195, fz + 0.04), new V3(0, 0.19, fz + 0.12), new V3(0, 0.162, fz + 0.17),
+  ]);
+  MODEL.add(new THREE.Mesh(new THREE.TubeGeometry(spoutCurve, 48, 0.011, 20), M.chrome));
+  const tipCap = new THREE.Mesh(new THREE.SphereGeometry(0.0112, 20, 12), M.chrome);
+  tipCap.position.set(0, 0.165, fz); MODEL.add(tipCap);
+  const aer = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.012, 24), M.chrome);
+  aer.position.set(0, 0.158, fz + 0.17); MODEL.add(aer);
+  const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.004, 0.004, 0.07, 12), M.chrome);
+  handle.position.set(0, 0.2, fz - 0.02); handle.rotation.x = -0.7; MODEL.add(handle);
 }
-const SPOUT_TIP = new V3(0, 0.258, -0.12);
+const SPOUT_TIP = new V3(0, 0.152, -0.13);
 
 /* ============================================================
    下水管：透明尾管 + P 形存水弯（U 弯后上升、转 90° 穿进后墙）
@@ -404,7 +364,7 @@ function pipeCurve(y0) {
   for (let i = 0; i <= 24; i++) { const a = lerp(Math.PI, 2 * Math.PI, i / 24); add(R + R * Math.cos(a), yU + R * Math.sin(a)); }   // U 弯（存水）
   line(new V3(x, yU, 0), new V3(x, yE, 0));
   for (let i = 0; i <= 16; i++) { const a = i / 16 * Math.PI / 2; add(x, yE + rE * Math.sin(a), -rE + rE * Math.cos(a)); }   // 90° 弯头朝后
-  line(new V3(x, yE + rE, -rE), new V3(x, yE + rE, DIM.cab.back + 0.01));
+  line(new V3(x, yE + rE, -rE), new V3(x, yE + rE, TRAP.zEnd));
   return new THREE.CatmullRomCurve3(P, false, 'centripetal');
 }
 const _tmp = new V3();
@@ -427,10 +387,26 @@ function inPipe(u, a, r, out) {
 }
 
 {
-  // 水槽底下的锁母
-  const nut = new THREE.Mesh(new THREE.CylinderGeometry(0.029, 0.029, 0.016, 6), M.brass);
-  nut.position.y = SINK_BOT - 0.008;
+  const P = DIM.pipe;
+  // 镀铬尾管 + 黄铜锁母
+  const tailLen = DRAIN_Y - B.t - P.top + 0.006;
+  const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.019, 0.019, tailLen, 40), M.chrome);
+  tail.position.y = P.top + tailLen / 2 - 0.004;
+  MODEL.add(tail);
+  const nutTop = new THREE.Mesh(new THREE.CylinderGeometry(0.029, 0.029, 0.012, 40), M.chrome);
+  nutTop.position.y = DRAIN_Y - B.t - 0.008;
+  MODEL.add(nutTop);
+  const nut = new THREE.Mesh(new THREE.CylinderGeometry(0.027, 0.027, 0.018, 6), M.brass);
+  nut.position.y = P.top + 0.002;
   MODEL.add(nut);
+  const outNut = nut.clone();
+  outNut.position.set(0.30, P.bottom + 0.012, 0);
+  MODEL.add(outNut);
+  // 横管穿墙处的装饰圈
+  const esc = new THREE.Mesh(new THREE.CylinderGeometry(0.036, 0.036, 0.008, 40), M.chrome);
+  esc.rotation.x = Math.PI / 2;
+  esc.position.set(TRAP.x, TRAP.yOut, TRAP.zEnd);
+  MODEL.add(esc);
 }
 
 // 透明管（最后渲染）
@@ -459,7 +435,7 @@ waterTube.renderOrder = 9;
 MODEL.add(waterTube);
 
 // 水龙头水柱
-const STREAM_LEN = SPOUT_TIP.y - FLOOR_Y;
+const STREAM_LEN = SPOUT_TIP.y - yIn(Math.abs(SPOUT_TIP.z));
 const stream = new THREE.Mesh(new THREE.CylinderGeometry(0.0042, 0.0055, 1, 16, 1, true), waterMat(true));
 stream.renderOrder = 9;
 MODEL.add(stream);
@@ -561,50 +537,68 @@ function makeFly() {
 /* ============================================================
    台盆里的泡沫：瓶盖周围摊开的一层慕斯（花瓣状边缘）
    ============================================================ */
-const PUD = { nt: 96, nr: 18, rin: 0.022 };
+const bowlY = (x, z) => yIn(Math.hypot(x / B.sx, z));
+function bowlN(x, z, out) {
+  const e = 1e-3;
+  const dx = (bowlY(x + e, z) - bowlY(x - e, z)) / (2 * e), dz = (bowlY(x, z + e) - bowlY(x, z - e)) / (2 * e);
+  return out.set(-dx, 1, -dz).normalize();
+}
+
+const PUD = { nt: 72, nr: 18, a0: Math.PI, a1: 2 * Math.PI, rin: 0.024 };   // 只铺后半盆（前半盆是剖开的）
 const puddleGeo = new THREE.BufferGeometry();
 {
-  const { nt, nr } = PUD, vc = (nt + 1) * (nr + 1);
-  puddleGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vc * 3), 3));
-  puddleGeo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(vc * 2), 2));
+  const { nt, nr } = PUD, top = (nt + 1) * (nr + 1), side = 2 * (nr + 1) * 2;
+  puddleGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array((top + side) * 3), 3));
+  puddleGeo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array((top + side) * 2), 2));
   const idx = [];
   for (let j = 0; j < nt; j++) for (let i = 0; i < nr; i++) {
     const a = j * (nr + 1) + i, b = a + nr + 1;
     idx.push(a, b, a + 1, a + 1, b, b + 1);
+  }
+  for (let e = 0; e < 2; e++) {            // 两端的剖切面：泡沫顶面 ↔ 盆面
+    const o = top + e * 2 * (nr + 1);
+    for (let i = 0; i < nr; i++) { const a = o + i * 2; idx.push(a, a + 1, a + 2, a + 2, a + 1, a + 3); }
   }
   puddleGeo.setIndex(idx);
 }
 const basinFoam = new THREE.Mesh(puddleGeo, foamMat());
 basinFoam.material.side = THREE.DoubleSide;
 basinFoam.frustumCulled = false;
-basinFoam.renderOrder = 3;
 MODEL.add(basinFoam);
 
-/* 每帧重摆：k = 铺开程度 0~1，h = 厚度系数 */
+/* 每帧重摆顶面：k = 铺开程度 0~1，h = 厚度系数 */
 function layPuddle(k, h) {
-  const { nt, nr, rin } = PUD, pos = puddleGeo.attributes.position.array;
-  const R = rin + 0.12 * Math.sqrt(k);
+  const { nt, nr, a0, a1, rin } = PUD, pos = puddleGeo.attributes.position.array;
+  const R = rin + 0.095 * Math.sqrt(k);
+  const ring = [];
   for (let j = 0; j <= nt; j++) {
-    const a = j / nt * Math.PI * 2;
+    const a = lerp(a0, a1, j / nt);
     const Ra = rin + (R - rin) * (1 + 0.14 * Math.sin(a * 5 + 1) + 0.07 * Math.sin(a * 11 + 2.3));
     for (let i = 0; i <= nr; i++) {
       const t = i / nr, r = lerp(rin, Ra, t);
+      const x = r * Math.cos(a) * B.sx, z = r * Math.sin(a);
       // 中间厚、边缘圆润收薄；瓶盖口一圈被挤得更鼓；表面有几道褶
-      let th = 0.011 * Math.pow(1 - t * t, 0.4) + 0.016 * Math.exp(-(((r - 0.034) / 0.013) ** 2)) * (1 - t * 0.5);
+      let th = 0.011 * Math.pow(1 - t * t, 0.4) + 0.016 * Math.exp(-(((r - 0.038) / 0.013) ** 2)) * (1 - t * 0.5);
       th *= h * (1 + 0.28 * Math.sin(a * 7 + r * 140) * Math.sin(r * 260 + a * 3) * (1 - t * 0.6));
       const v = (j * (nr + 1) + i) * 3;
-      pos[v] = r * Math.cos(a) * 1.15; pos[v + 1] = FLOOR_Y + th + 0.0004; pos[v + 2] = r * Math.sin(a);
+      pos[v] = x; pos[v + 1] = bowlY(x, z) + th + 0.0004; pos[v + 2] = z;
+      if (j === 0 || j === nt) ring.push([x, bowlY(x, z) + th + 0.0004, z, bowlY(x, z) - 0.001]);
     }
   }
+  let v = (nt + 1) * (nr + 1) * 3;
+  for (const [x, yt, z, yb] of ring) { pos.set([x, yt, z, x, yb, z], v); v += 6; }
   puddleGeo.attributes.position.needsUpdate = true;
   puddleGeo.computeVertexNormals();
 }
 
 /* ============================================================
-   溢水口：水槽后壁上的长圆孔，背后有一条溢水通道接到下水尾管
+   溢水口：台盆内壁上的长圆孔，背后有一条溢水通道接到下水尾管
    按住下水口打泡沫 → 泡沫顺通道倒灌上来 → 从溢水口像牙膏一样挤出、垂下、层层叠起
    ============================================================ */
-const OVF = { p: new V3(-0.08, -0.06, SINK.zb), n: new V3(0, 0, 1) };
+const OVF_R = 0.186, OVF_A = -Math.PI + 1.07;                  // 左后方内壁、靠近盆沿
+const OVF = { p: new V3(OVF_R * Math.cos(OVF_A) * B.sx, 0, OVF_R * Math.sin(OVF_A)), n: new V3() };
+OVF.p.y = bowlY(OVF.p.x, OVF.p.z);
+bowlN(OVF.p.x, OVF.p.z, OVF.n);
 {
   const hole = new THREE.Group();
   hole.position.copy(OVF.p).addScaledVector(OVF.n, 0.0006);
@@ -617,15 +611,14 @@ const OVF = { p: new V3(-0.08, -0.06, SINK.zb), n: new V3(0, 0, 1) };
   MODEL.add(hole);
 }
 
-/* 溢水通道：尾管背面三通 → 水槽底下 → 贴着水槽后壁上去 → 穿过后壁到溢水口
-   被水槽挡住，所以像原理图一样用"透视"画法：放进不透明队列、不做深度测试，
+/* 溢水通道：尾管背面三通 → 台盆底下 → 绕到盆后 → 穿过盆壁到溢水口
+   被台盆挡住，所以像原理图一样用"透视"画法：放进不透明队列、不做深度测试，
    画在陶瓷/橱柜之后、罐子和泡沫之前 → 能透过水槽看见，但不会盖住罐子 */
 const xray = m => Object.assign(m, { transparent: false, depthTest: false, depthWrite: false, blending: THREE.CustomBlending,
   blendSrcAlpha: THREE.ZeroFactor, blendDstAlpha: THREE.OneFactor });     // 不改画布 alpha，否则导出视频时会和黑底混成灰色
 const CHAN = new THREE.CatmullRomCurve3([
-  [0, -0.305, -0.004], [-0.015, -0.300, -0.08], [-0.05, -0.292, -0.19], [-0.08, -0.268, -0.262],
-  [-0.08, -0.20, -0.268], [-0.08, -0.10, -0.262], [-0.08, -0.07, -0.245], [-0.08, -0.06, -0.222], [-0.08, -0.06, SINK.zb + 0.002],
-].map(p => new V3(...p)), false, 'centripetal');
+  [0, -0.232, -0.004], [-0.02, -0.226, -0.07], [-0.07, -0.19, -0.17], [-0.11, -0.12, -0.215],
+  [-0.125, -0.075, -0.215], [OVF.p.x - 0.002, OVF.p.y - 0.006, OVF.p.z - 0.03], [OVF.p.x, OVF.p.y, OVF.p.z - 0.004],].map(p => new V3(...p)), false, 'centripetal');
 const chanGlassM = xray(glassMat(0.7));
 const chanGlass = new THREE.Mesh(new THREE.TubeGeometry(CHAN, 120, 0.013, 20), chanGlassM);
 chanGlass.renderOrder = 2;
@@ -635,7 +628,7 @@ const chanFoam = new THREE.Mesh(new THREE.TubeGeometry(CHAN, 120, 0.0105, 16), c
 chanFoam.renderOrder = 1;
 MODEL.add(chanFoam);
 // 尾管上段也透视一下，让通道看得出是接在下水管上的
-const STUB_U = uAtY(-0.335);
+const STUB_U = uAtY(-0.26);
 const STUB = new THREE.CatmullRomCurve3(Array.from({ length: 9 }, (_, i) => FLOW.getPointAt(STUB_U * i / 8)));
 const stubGlass = new THREE.Mesh(new THREE.TubeGeometry(STUB, 24, DIM.pipe.r, 24), xray(glassMat(0.7)));
 stubGlass.renderOrder = 2;
@@ -645,17 +638,20 @@ const stubFoam = new THREE.Mesh(new THREE.TubeGeometry(STUB, 24, DIM.pipe.rIn, 2
 stubFoam.renderOrder = 1;
 MODEL.add(stubFoam);
 
-/* 泡沫带的中心线：(横向偏移, y, z)；出孔 → 贴后壁垂下 → 摊到槽底 → 往回折两层 */
-const RIB = { w: 0.015, h: 0.0075, n: 260, seg: 18, M: 600 };
+/* 泡沫带的中心线：(离盆心半径, 横向偏移, 离壁高度)，下垂到盆壁后折叠回来再折一次 */
+const RIB = { w: 0.015, h: 0.0075, n: 200, seg: 18, M: 400 };
 {
-  const lat = new V3(1, 0, 0), zb = SINK.zb, hy = OVF.p.y, F = FLOOR_Y;
+  const lat = new V3(-Math.sin(OVF_A) * B.sx, 0, Math.cos(OVF_A)).normalize();
   const pts = [
-    [0, hy, zb - 0.008], [0, hy, zb + 0.006], [0, hy - 0.004, zb + 0.019], [0.002, hy - 0.016, zb + 0.024],
-    [0.003, hy - 0.040, zb + 0.016], [0.004, hy - 0.075, zb + 0.0095], [0.003, hy - 0.115, zb + 0.009],
-    [0.002, F + 0.035, zb + 0.0095], [0, F + 0.012, zb + 0.025], [0, F + 0.0085, zb + 0.055], [-0.002, F + 0.0085, zb + 0.085],
-    [-0.004, F + 0.016, zb + 0.097], [-0.004, F + 0.0245, zb + 0.088], [-0.002, F + 0.025, zb + 0.062], [0, F + 0.030, zb + 0.046],
-    [0.002, F + 0.0385, zb + 0.051], [0.003, F + 0.040, zb + 0.076], [0.001, F + 0.041, zb + 0.090], [0, F + 0.045, zb + 0.097],
-  ].map(([l, y, z]) => new V3(OVF.p.x + l, y, z));
+    [0.190, 0, -0.008], [0.185, 0, 0.006], [0.178, 0, 0.019], [0.168, 0.002, 0.023], [0.155, 0.003, 0.016],
+    [0.140, 0.004, 0.0095], [0.122, 0.003, 0.0088], [0.106, 0, 0.0090], [0.096, -0.003, 0.0160],
+    [0.103, -0.005, 0.0240], [0.120, -0.003, 0.0245], [0.134, 0, 0.0300], [0.131, 0.003, 0.0385],
+    [0.116, 0.005, 0.0395], [0.098, 0.003, 0.0390], [0.087, 0, 0.0410], [0.081, -0.002, 0.0450],
+  ].map(([r, l, lift]) => {
+    const x = r * Math.cos(OVF_A) * B.sx, z = r * Math.sin(OVF_A);
+    const p = new V3(x, bowlY(x, z), z).addScaledVector(lat, l);
+    return p.addScaledVector(bowlN(p.x, p.z, new V3()), lift);
+  });
   const curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
   RIB.len = curve.getLength();
   RIB.P = []; RIB.N = []; RIB.Bn = [];
@@ -664,7 +660,7 @@ const RIB = { w: 0.015, h: 0.0075, n: 260, seg: 18, M: 600 };
     const u = i / RIB.M;
     RIB.P.push(curve.getPointAt(u));
     curve.getTangentAt(u, t);
-    const n = new V3().crossVectors(t, lat).normalize();     // 扁的一面贴着槽壁
+    const n = new V3().crossVectors(t, lat).normalize();     // 扁的一面贴着盆壁
     RIB.N.push(n); RIB.Bn.push(new V3().crossVectors(n, t).normalize());
   }
 }
@@ -719,7 +715,7 @@ const OVF_FLIES = [[0.22, 0.4, 0.5], [0.40, -0.5, 2.0], [0.55, 0.2, 4.0], [0.72,
   MODEL.add(o);
   return { o, f, l, sp };
 });
-const _up = new V3(0, 1, 0), _ref = new V3(0, 0.6, 0.8).normalize(), _oq = new THREE.Quaternion();
+const _up = new V3(0, 1, 0), _ref = new V3(0.3, 0.7, 0.65).normalize(), _oq = new THREE.Quaternion();
 function placeOvfFlies(k, m) {
   for (const fl of OVF_FLIES) {
     const L = fl.f * RIB.len, pop = sstep(clamp01((k * RIB.len - L - 0.01) / 0.02)) * m;
@@ -818,9 +814,9 @@ const gauss = () => (rnd() + rnd() + rnd() - 1.5) / 1.5;
 const GERMS = [];
 const popRingGeo = new THREE.RingGeometry(0.82, 1, 40);
 [
-  [-0.10, -0.42, 0.05, 'red', 0.018], [0.30, -0.33, 0.04, 'blue', 0.016], [0.26, -0.58, 0.06, 'green', 0.015],
-  [-0.08, -0.62, 0.03, 'blue', 0.012], [0.38, -0.47, 0.02, 'red', 0.013], [0.09, -0.70, 0.05, 'green', 0.011],
-  [0.34, -0.68, 0.04, 'blue', 0.014], [-0.17, -0.33, 0.02, 'green', 0.010], [0.075, -0.40, 0.07, 'red', 0.010],
+  [-0.10, -0.30, 0.05, 'red', 0.018], [0.25, -0.13, 0.04, 'blue', 0.016], [0.21, -0.40, 0.06, 'green', 0.015],
+  [-0.07, -0.45, 0.03, 'blue', 0.012], [0.40, -0.33, 0.02, 'red', 0.013], [0.09, -0.50, 0.05, 'green', 0.011],
+  [0.38, -0.52, 0.04, 'blue', 0.014], [-0.15, -0.20, 0.02, 'green', 0.010], [0.075, -0.25, 0.07, 'red', 0.010],
 ].forEach(([x, y, z, c, s], i) => {
   const o = new THREE.Mesh(GERM_GEO, germMat(c));
   o.position.set(x, y, z);
@@ -832,8 +828,8 @@ const popRingGeo = new THREE.RingGeometry(0.82, 1, 40);
 
 /* 装饰气泡 */
 const BUBBLES = [];
-[[-0.24, -0.48, 0.06, 0.03], [-0.18, -0.68, 0.02, 0.018], [0.40, -0.38, 0.03, 0.022], [0.40, -0.62, 0.08, 0.012],
- [-0.30, -0.34, 0.10, 0.014], [0.17, -0.74, 0.05, 0.016], [0.27, -0.31, 0.06, 0.02], [-0.05, -0.74, 0.08, 0.01]]
+[[-0.22, -0.35, 0.06, 0.03], [-0.18, -0.52, 0.02, 0.018], [0.48, -0.25, 0.03, 0.022], [0.46, -0.45, 0.08, 0.012],
+ [-0.30, -0.10, 0.10, 0.014], [0.17, -0.58, 0.05, 0.016], [0.56, -0.08, 0.00, 0.02], [-0.05, -0.58, 0.08, 0.01]]
 .forEach(([x, y, z, r], i) => {
   const o = new THREE.Mesh(new THREE.SphereGeometry(r, 32, 20), glassMat(0.9));
   o.position.set(x, y, z); o.renderOrder = 11;
@@ -933,11 +929,11 @@ function canPose(T, out) {
    机位 + 自动运镜
    ============================================================ */
 export const VIEWS = {
-  full:    { name: '全景',   p: [0.80, 0.30, 2.15], t: [0.05, -0.33, -0.05] },
-  product: { name: '产品',   p: [-0.40, 0.25, 0.28], t: [-0.58, 0.11, -0.15] },
-  basin:   { name: '水槽',   p: [0.16, 0.50, 0.70], t: [0.0, -0.17, -0.06] },
-  pipe:    { name: '存水弯', p: [0.34, -0.40, 0.95], t: [0.10, -0.46, -0.05] },
-  ovf:     { name: '溢水口', p: [-0.62, 0.30, 0.95], t: [-0.02, -0.25, -0.08] },
+  full:    { name: '全景',   p: [0.42, 0.10, 1.55], t: [0.05, -0.22, -0.05] },
+  product: { name: '产品',   p: [-0.27, 0.20, 0.40], t: [-0.45, 0.14, -0.17] },
+  basin:   { name: '台盆',   p: [0.14, 0.17, 0.66], t: [0.0, -0.05, -0.03] },
+  pipe:    { name: '存水弯', p: [0.26, -0.30, 0.98], t: [0.15, -0.36, -0.05] },
+  ovf:     { name: '溢水口', p: [-0.42, 0.10, 0.62], t: [-0.04, -0.13, -0.10] },
 };
 const CAM_KEYS = [[0, 'product'], [2.5, 'product'], [3.7, 'basin'], [5.0, 'basin'], [5.9, 'ovf'], [7.6, 'ovf'], [8.5, 'pipe'], [10.5, 'pipe'],
                   [11.7, 'full'], [14.1, 'full'], [15.3, 'pipe'], [17.7, 'pipe'], [18.9, 'full']];
