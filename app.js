@@ -27,7 +27,7 @@ const PINK_CSS = '#f48cbf';
 /* ---------- 动画时间轴（秒） ---------- */
 export const TL = {
   twist: [0, 1.2], lift: [1.2, 1.6], shake: [1.5, 2.6], move: [2.6, 4.0], press: [4.0, 4.6],
-  basin: [4.6, 6.8], foam: [5.0, 9.0], back: [9.0, 10.5], unTwist: [10.5, 11.0], soak: [10.6, 12.4],
+  basin: [4.6, 6.8], over: [4.9, 6.6], foam: [5.4, 9.0], back: [9.0, 10.5], unTwist: [10.5, 11.0], soak: [10.6, 12.4],
   stream: [12.5, 15.5], basinOut: [12.8, 14.6], water: [13.0, 15.8], waterTail: [14.8, 17.2],
   shine: [16.5, 18.0], end: 18.2,
 };
@@ -35,7 +35,7 @@ const STEPS = [
   [0,    '① 扭到 OPEN 档'],
   [1.2,  '② 摇匀 10 次'],
   [2.6,  '③ 倒扣，按住下水口'],
-  [4.6,  '④ 泡沫灌满存水弯，裹住污垢'],
+  [4.6,  '④ 泡沫灌满存水弯，溢水口也冒出来'],
   [9.0,  '⑤ 静置 30 分钟，分解油污 · 杀菌'],
   [12.5, '⑥ 打开水龙头冲净'],
   [16.5, '✨ 管道通畅 · 洁净无味'],
@@ -153,28 +153,35 @@ const GLSL_NOISE = /* glsl */`
   }`;
 const uTime = { value: 0 };
 
-/* 泡沫：粉色细密泡泡（Worley 噪声），uv.x 超出 [uTail, uHead] 的部分裁掉 = 泡沫前沿 */
-function foamMat(head = 9, tail = -9) {
+/* 泡沫：视频里那种浓稠顺滑的粉色慕斯（奶油质感 + 极细微孔），uv.x 超出 [uTail, uHead] 的部分裁掉 = 泡沫前沿
+   speck > 0 时带出褐色脏点（溢水口挤出来的泡沫） */
+function foamMat(head = 9, tail = -9, speck = 0) {
   return new THREE.ShaderMaterial({
     uniforms: {
-      uTime, uHead: { value: head }, uTail: { value: tail },
-      uA: { value: new THREE.Color('#ffd3e6') }, uB: { value: new THREE.Color('#ee7fb3') },
+      uTime, uHead: { value: head }, uTail: { value: tail }, uSpeck: { value: speck },
+      uA: { value: new THREE.Color('#fcdbe6') }, uB: { value: new THREE.Color('#df86a6') },
     },
     vertexShader: VS_COMMON,
     fragmentShader: GLSL_NOISE + /* glsl */`
-      uniform float uHead, uTail, uTime; uniform vec3 uA, uB;
+      uniform float uHead, uTail, uTime, uSpeck; uniform vec3 uA, uB;
       varying vec2 vUv; varying vec3 vW; varying vec3 vN;
       void main(){
         if (vUv.x > uHead || vUv.x < uTail) discard;
-        vec3 p = vW * 240.0 + vec3(0.0, uTime * 0.5, uTime * 0.25);
-        vec2 a = worley(p), b = worley(p * 2.2 + 7.0);
-        float wall = min(a.y, b.y * 1.4);
         vec3 N = normalize(vN), V = normalize(cameraPosition - vW);
         if (!gl_FrontFacing) N = -N;
-        float dif = 0.62 + 0.38 * max(dot(N, normalize(vec3(-0.4, 0.9, 0.5))), 0.0);
-        vec3 col = mix(uB, uA, smoothstep(0.0, 0.22, wall)) * dif;
-        col += smoothstep(0.30, 0.05, a.x) * 0.22;
-        col += pow(1.0 - abs(dot(N, V)), 2.5) * 0.35;
+        // 细腻微孔：高频噪声轻推法线
+        vec3 q = vW * 700.0;
+        float n0 = vnoise(q);
+        vec3 g = vec3(vnoise(q + vec3(0.35, 0.0, 0.0)), vnoise(q + vec3(0.0, 0.35, 0.0)), vnoise(q + vec3(0.0, 0.0, 0.35))) - n0;
+        N = normalize(N - g * 0.5);
+        vec3 L = normalize(vec3(-0.4, 0.9, 0.5));
+        float wrap = clamp((dot(N, L) + 0.45) / 1.45, 0.0, 1.0);
+        vec3 col = mix(uB, uA, smoothstep(0.05, 0.95, wrap));   // 暗部偏深粉，像奶油的次表面透光
+        col *= 0.72 + 0.32 * wrap + 0.06 * (vnoise(vW * 55.0) - 0.5);
+        col += pow(max(dot(N, normalize(L + V)), 0.0), 28.0) * 0.20;
+        col += pow(1.0 - abs(dot(N, V)), 3.0) * 0.16;
+        float sk = smoothstep(0.83, 0.88, vnoise(vW * 480.0)) * smoothstep(0.50, 0.72, vnoise(vW * 60.0 + 3.0));
+        col = mix(col, vec3(0.33, 0.25, 0.18), sk * uSpeck);
         gl_FragColor = vec4(col, 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
@@ -498,24 +505,148 @@ canShadow.position.set(DIM.home[0], 0.0008, DIM.home[2]);
 MODEL.add(canShadow);
 
 /* ============================================================
-   台盆里的泡沫团
+   台盆里的泡沫：瓶盖周围摊开的一层慕斯（花瓣状边缘）
    ============================================================ */
-const BLOBS = [];
-const basinFoam = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 18, 12), foamMat(), 110);
+const bowlY = (x, z) => yIn(Math.hypot(x / B.sx, z));
+function bowlN(x, z, out) {
+  const e = 1e-3;
+  const dx = (bowlY(x + e, z) - bowlY(x - e, z)) / (2 * e), dz = (bowlY(x, z + e) - bowlY(x, z - e)) / (2 * e);
+  return out.set(-dx, 1, -dz).normalize();
+}
+
+const PUD = { nt: 72, nr: 18, a0: Math.PI, a1: 2 * Math.PI, rin: 0.024 };   // 只铺后半盆（前半盆是剖开的）
+const puddleGeo = new THREE.BufferGeometry();
+{
+  const { nt, nr } = PUD, top = (nt + 1) * (nr + 1), side = 2 * (nr + 1) * 2;
+  puddleGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array((top + side) * 3), 3));
+  puddleGeo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array((top + side) * 2), 2));
+  const idx = [];
+  for (let j = 0; j < nt; j++) for (let i = 0; i < nr; i++) {
+    const a = j * (nr + 1) + i, b = a + nr + 1;
+    idx.push(a, b, a + 1, a + 1, b, b + 1);
+  }
+  for (let e = 0; e < 2; e++) {            // 两端的剖切面：泡沫顶面 ↔ 盆面
+    const o = top + e * 2 * (nr + 1);
+    for (let i = 0; i < nr; i++) { const a = o + i * 2; idx.push(a, a + 1, a + 2, a + 2, a + 1, a + 3); }
+  }
+  puddleGeo.setIndex(idx);
+}
+const basinFoam = new THREE.Mesh(puddleGeo, foamMat());
+basinFoam.material.side = THREE.DoubleSide;
 basinFoam.frustumCulled = false;
 MODEL.add(basinFoam);
-for (let i = 0; i < 110; i++) {
-  const layer = i < 72 ? 0 : 1;
-  let rr = 0.028 + 0.11 * Math.sqrt(rnd());
-  if (layer) rr *= 0.7;
-  const phi = Math.PI / 2 - 0.35 + rnd() * (Math.PI + 0.7);
-  const x = rr * Math.sin(phi) * B.sx * 0.9, z = rr * Math.cos(phi);
-  const size = (0.011 + 0.014 * rnd()) * (1.25 - rr * 2.5);
-  const reff = Math.hypot(x / B.sx, Math.min(z, 0));
-  BLOBS.push({
-    x, z, size, y: yIn(reff) + size * (layer ? 1.3 : 0.5),
-    th: clamp01(rr / 0.14) * 0.8 + layer * 0.18, out: rnd() * 0.75, ph: rnd() * 6.28,
+
+/* 每帧重摆顶面：k = 铺开程度 0~1，h = 厚度系数 */
+function layPuddle(k, h) {
+  const { nt, nr, a0, a1, rin } = PUD, pos = puddleGeo.attributes.position.array;
+  const R = rin + 0.095 * Math.sqrt(k);
+  const ring = [];
+  for (let j = 0; j <= nt; j++) {
+    const a = lerp(a0, a1, j / nt);
+    const Ra = rin + (R - rin) * (1 + 0.14 * Math.sin(a * 5 + 1) + 0.07 * Math.sin(a * 11 + 2.3));
+    for (let i = 0; i <= nr; i++) {
+      const t = i / nr, r = lerp(rin, Ra, t);
+      const x = r * Math.cos(a) * B.sx, z = r * Math.sin(a);
+      // 中间厚、边缘圆润收薄；瓶盖口一圈被挤得更鼓；表面有几道褶
+      let th = 0.011 * Math.pow(1 - t * t, 0.4) + 0.016 * Math.exp(-(((r - 0.038) / 0.013) ** 2)) * (1 - t * 0.5);
+      th *= h * (1 + 0.28 * Math.sin(a * 7 + r * 140) * Math.sin(r * 260 + a * 3) * (1 - t * 0.6));
+      const v = (j * (nr + 1) + i) * 3;
+      pos[v] = x; pos[v + 1] = bowlY(x, z) + th + 0.0004; pos[v + 2] = z;
+      if (j === 0 || j === nt) ring.push([x, bowlY(x, z) + th + 0.0004, z, bowlY(x, z) - 0.001]);
+    }
+  }
+  let v = (nt + 1) * (nr + 1) * 3;
+  for (const [x, yt, z, yb] of ring) { pos.set([x, yt, z, x, yb, z], v); v += 6; }
+  puddleGeo.attributes.position.needsUpdate = true;
+  puddleGeo.computeVertexNormals();
+}
+
+/* ============================================================
+   溢水口：泡沫从台盆内壁的小孔挤出来，像牙膏一样垂下、层层叠起
+   ============================================================ */
+const OVF_R = 0.186, OVF_A = -Math.PI + 1.07;                  // 左后方内壁、靠近盆沿
+const OVF = { p: new V3(OVF_R * Math.cos(OVF_A) * B.sx, 0, OVF_R * Math.sin(OVF_A)), n: new V3() };
+OVF.p.y = bowlY(OVF.p.x, OVF.p.z);
+bowlN(OVF.p.x, OVF.p.z, OVF.n);
+{
+  const hole = new THREE.Group();
+  hole.position.copy(OVF.p).addScaledVector(OVF.n, 0.0006);
+  hole.lookAt(hole.position.clone().add(OVF.n));
+  hole.scale.set(1.45, 1, 1);
+  hole.add(new THREE.Mesh(new THREE.CircleGeometry(0.0072, 32), new THREE.MeshBasicMaterial({ color: 0x2b2b30 })));
+  const rim = new THREE.Mesh(new THREE.RingGeometry(0.0072, 0.0098, 40), M.chrome);
+  rim.position.z = 0.0002;
+  hole.add(rim);
+  MODEL.add(hole);
+}
+
+/* 泡沫带的中心线：(离盆心半径, 横向偏移, 离壁高度)，下垂到盆壁后折叠回来再折一次 */
+const RIB = { w: 0.015, h: 0.0075, n: 200, seg: 18, M: 400 };
+{
+  const lat = new V3(-Math.sin(OVF_A) * B.sx, 0, Math.cos(OVF_A)).normalize();
+  const pts = [
+    [0.190, 0, -0.008], [0.185, 0, 0.006], [0.178, 0, 0.019], [0.168, 0.002, 0.023], [0.155, 0.003, 0.016],
+    [0.140, 0.004, 0.0095], [0.122, 0.003, 0.0088], [0.106, 0, 0.0090], [0.096, -0.003, 0.0160],
+    [0.103, -0.005, 0.0240], [0.120, -0.003, 0.0245], [0.134, 0, 0.0300], [0.131, 0.003, 0.0385],
+    [0.116, 0.005, 0.0395], [0.098, 0.003, 0.0390], [0.087, 0, 0.0410], [0.081, -0.002, 0.0450],
+  ].map(([r, l, lift]) => {
+    const x = r * Math.cos(OVF_A) * B.sx, z = r * Math.sin(OVF_A);
+    const p = new V3(x, bowlY(x, z), z).addScaledVector(lat, l);
+    return p.addScaledVector(bowlN(p.x, p.z, new V3()), lift);
   });
+  const curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
+  RIB.len = curve.getLength();
+  RIB.P = []; RIB.N = []; RIB.Bn = [];
+  const t = new V3();
+  for (let i = 0; i <= RIB.M; i++) {
+    const u = i / RIB.M;
+    RIB.P.push(curve.getPointAt(u));
+    curve.getTangentAt(u, t);
+    const n = new V3().crossVectors(t, lat).normalize();     // 扁的一面贴着盆壁
+    RIB.N.push(n); RIB.Bn.push(new V3().crossVectors(n, t).normalize());
+  }
+}
+const ribbonGeo = new THREE.BufferGeometry();
+{
+  const { n, seg } = RIB, vc = (n + 1) * (seg + 1);
+  ribbonGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vc * 3), 3));
+  ribbonGeo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(vc * 2), 2));
+  const idx = [];
+  for (let i = 0; i < n; i++) for (let k = 0; k < seg; k++) {
+    const a = i * (seg + 1) + k, b = a + seg + 1;
+    idx.push(a, a + 1, b, a + 1, b + 1, b);
+  }
+  ribbonGeo.setIndex(idx);
+}
+const ovfFoamM = foamMat(9, -9, 0.9);
+ovfFoamM.side = THREE.DoubleSide;
+const ovfFoam = new THREE.Mesh(ribbonGeo, ovfFoamM);
+ovfFoam.frustumCulled = false;
+MODEL.add(ovfFoam);
+
+/* 每帧重建：k = 挤出长度 0~1，m = 粗细系数（静置略塌、冲水时化掉） */
+function extrudeRibbon(k, m) {
+  const { n, seg, M: SM, w, h } = RIB, pos = ribbonGeo.attributes.position.array;
+  const head = Math.max(k * RIB.len, 1e-4), cap = Math.min(0.012, head);
+  const p = new V3();
+  for (let i = 0; i <= n; i++) {
+    const L = head * i / n, f = L / RIB.len * SM, j = Math.min(Math.floor(f), SM - 1);
+    p.lerpVectors(RIB.P[j], RIB.P[j + 1], f - j);
+    const N = RIB.N[j], Bn = RIB.Bn[j];
+    const grow = 0.68 + 0.32 * sstep(clamp01(L / 0.02));             // 刚出孔时细，出来后胀开
+    const x = clamp01((L - (head - cap)) / cap), tip = Math.sqrt(1 - x * x);
+    const W = w * grow * tip * m * (1 + 0.06 * Math.sin(L * 260)), H = h * (0.75 + 0.25 * grow) * tip * m;
+    for (let s = 0; s <= seg; s++) {
+      const a = s / seg * Math.PI * 2, c = Math.cos(a), sn = Math.sin(a);
+      const cw = Math.sign(c) * Math.abs(c) ** 0.6 * W, ch = Math.sign(sn) * Math.abs(sn) ** 0.6 * H;   // 圆角扁带
+      const v = (i * (seg + 1) + s) * 3;
+      pos[v]     = p.x + Bn.x * cw + N.x * ch;
+      pos[v + 1] = p.y + Bn.y * cw + N.y * ch;
+      pos[v + 2] = p.z + Bn.z * cw + N.z * ch;
+    }
+  }
+  ribbonGeo.attributes.position.needsUpdate = true;
+  ribbonGeo.computeVertexNormals();
 }
 
 /* ============================================================
@@ -718,7 +849,7 @@ export const VIEWS = {
   basin:   { name: '台盆',   p: [0.14, 0.17, 0.66], t: [0.0, -0.05, -0.03] },
   pipe:    { name: '存水弯', p: [0.26, -0.30, 0.98], t: [0.15, -0.40, 0.0] },
 };
-const CAM_KEYS = [[0, 'product'], [2.5, 'product'], [3.7, 'basin'], [5.2, 'basin'], [6.6, 'pipe'], [9.0, 'pipe'],
+const CAM_KEYS = [[0, 'product'], [2.5, 'product'], [3.7, 'basin'], [6.1, 'basin'], [7.3, 'pipe'], [9.0, 'pipe'],
                   [10.2, 'full'], [12.6, 'full'], [13.8, 'pipe'], [16.2, 'pipe'], [17.4, 'full']];
 function camAt(T, P, Tg) {
   let i = 0;
@@ -745,7 +876,6 @@ controls.target.set(...VIEWS.full.t);
    evaluate(T)：把整个场景摆到时间 T 的样子
    ============================================================ */
 const pose = { p: new V3() };
-const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new V3(), _v = new V3();
 
 function evaluate(T, time) {
   uTime.value = time;
@@ -790,17 +920,14 @@ function evaluate(T, time) {
     stream.position.set(0, top - len / 2, SPOUT_TIP.z);
   }
 
-  /* 台盆泡沫团 */
-  BLOBS.forEach((b, i) => {
-    let s = b.size * sstep(seg(g, [b.th, b.th + 0.18]));
-    s *= (1 - 0.18 * soak) * (1 + 0.05 * Math.sin(time * 2 + b.ph));
-    s *= 1 - sstep(seg(outB, [b.out, b.out + 0.25]));
-    _s.setScalar(Math.max(s, 1e-5));
-    _v.set(b.x, b.y - (1 - Math.min(1, s / b.size)) * b.size * 0.4, b.z);
-    basinFoam.setMatrixAt(i, _m4.compose(_v, _q.identity(), _s));
-  });
-  basinFoam.instanceMatrix.needsUpdate = true;
-  basinFoam.visible = g > 0 && outB < 1;
+  /* 台盆泡沫 + 溢水口泡沫：静置略塌，冲水时化掉 */
+  const melt = (1 - 0.15 * soak) * (1 - sstep(outB));
+  basinFoam.visible = g > 0.001 && melt > 0.02;
+  if (basinFoam.visible) layPuddle(g * (1 - 0.4 * sstep(outB)), sstep(clamp01(g * 1.6)) * melt * (1 + 0.04 * Math.sin(time * 2)));
+  const ko = 1 - (1 - seg(T, TL.over)) ** 1.5;
+  const meltO = (1 - 0.12 * soak) * (1 - sstep(seg(outB, [0.2, 1])));
+  ovfFoam.visible = ko > 0.001 && meltO > 0.02;
+  if (ovfFoam.visible) extrudeRibbon(ko, meltO * (1 + 0.03 * Math.sin(time * 2.3)));
 
   /* 管内污垢：泡沫前沿推一下 → 浸泡分解 → 清水冲走 */
   for (const d of DIRT) {
@@ -965,13 +1092,15 @@ function tick() {
   requestAnimationFrame(tick);
 }
 
-/* URL 参数：?t=秒 定格 · ?v=机位 · ?ui=0 无界面 · ?play=1 自动播放 */
+/* URL 参数：?t=秒 定格 · ?v=机位 · ?cp/ct=自定机位 · ?ui=0 无界面 · ?play=1 自动播放 */
 {
   const q = new URLSearchParams(location.search);
   if (q.has('t')) setT(parseFloat(q.get('t')));
   if (q.get('v') && VIEWS[q.get('v')]) {
     camera.position.set(...VIEWS[q.get('v')].p); controls.target.set(...VIEWS[q.get('v')].t);
   } else if (q.has('t')) { camAt(state.T, camera.position, controls.target); }
+  if (q.get('cp')) camera.position.set(...q.get('cp').split(',').map(Number));     // ?cp=x,y,z&ct=x,y,z 自定机位
+  if (q.get('ct')) controls.target.set(...q.get('ct').split(',').map(Number));
   if (q.get('ui') === '0') document.body.classList.add('uihide');
   if (q.get('play') === '1') play(true);
 }
