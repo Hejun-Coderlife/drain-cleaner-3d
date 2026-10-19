@@ -452,7 +452,7 @@ MODEL.add(CAN);
 const CAPG = new THREE.Group();
 {
   const canM = new THREE.MeshPhysicalMaterial({ color: PINK, roughness: 0.38, clearcoat: 0.55, clearcoatRoughness: 0.22 });
-  new THREE.TextureLoader().load('can.png', t => {
+  new THREE.TextureLoader().load('can.png?v=20261019', t => {
     t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
     canM.map = t; canM.color.set(0xffffff); canM.needsUpdate = true;
   });
