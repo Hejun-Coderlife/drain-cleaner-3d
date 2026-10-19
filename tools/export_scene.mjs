@@ -47,7 +47,7 @@ await sleep(2500);                                         // 等罐子贴图加
 
 /* ---------- 浏览器里执行：定格 → 拷一份"烘焙"过的场景 → GLTFExporter ---------- */
 const BROWSER = /* js */`(async (T, scale) => {
-  const { THREE, scene, camera, controls, evaluate, frame } = DRAIN;
+  const { THREE, scene, frame } = DRAIN;
   const { GLTFExporter } = await import('three/addons/exporters/GLTFExporter.js');
   frame(T);                                               // 摆到 T（含自动运镜机位）
   scene.updateMatrixWorld(true);
@@ -164,9 +164,9 @@ const BROWSER = /* js */`(async (T, scale) => {
   {
     const bg = scene.background;
     const mat = new THREE.MeshBasicMaterial({ name: 'background', map: bg.isTexture ? bg : null, color: bg.isColor ? bg : 0xffffff });
-    const m = new THREE.Mesh(new THREE.PlaneGeometry(5, 3), mat);
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(5, 5), mat);
     m.name = 'background';
-    m.position.set(0, -0.15, -1.2);
+    m.position.set(0, -0.2, -1.2);
     root.add(m);
   }
 
@@ -177,11 +177,18 @@ const BROWSER = /* js */`(async (T, scale) => {
     if (seen[mt.name] > 1) mt.name += '_' + seen[mt.name];
   });
 
-  // 带上当前机位，方便在软件里直接切到网页同款视角
-  const cam = new THREE.PerspectiveCamera(camera.fov, 16 / 9, 0.01, 50);
-  cam.name = 'view_camera';
-  cam.position.copy(camera.position); cam.lookAt(controls.target);
-  root.add(cam);
+  // 两台全景相机：横屏 16:9 用网页「全景」机位；竖屏 9:16 视角放宽到 50° 并沿视线拉远（和录竖屏视频一致）
+  {
+    const v = DRAIN.VIEWS.full, P = new THREE.Vector3(...v.p), Tg = new THREE.Vector3(...v.t);
+    const tan = d => Math.tan(d * Math.PI / 360);
+    const add = (name, fov, aspect, pos) => {
+      const c = new THREE.PerspectiveCamera(fov, aspect, 0.01, 50);
+      c.name = name; c.position.copy(pos); c.lookAt(Tg); root.add(c);
+    };
+    add('cam_16x9', 35, 16 / 9, P);
+    const k = tan(35) * 16 / 9 * 0.7 / (tan(50) * 9 / 16);
+    add('cam_9x16', 50, 9 / 16, P.clone().sub(Tg).multiplyScalar(k).add(Tg));
+  }
 
   root.scale.setScalar(scale);
   const buf = await new GLTFExporter().parseAsync(root, { binary: true, maxTextureSize: 4096 });

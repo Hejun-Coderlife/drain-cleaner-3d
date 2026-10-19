@@ -452,7 +452,7 @@ MODEL.add(CAN);
 const CAPG = new THREE.Group();
 {
   const canM = new THREE.MeshPhysicalMaterial({ color: PINK, roughness: 0.38, clearcoat: 0.55, clearcoatRoughness: 0.22 });
-  new THREE.TextureLoader().load('can.png?v=20261019', t => {
+  new THREE.TextureLoader().load('can.png?v=20261019b', t => {
     t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
     canM.map = t; canM.color.set(0xffffff); canM.needsUpdate = true;
   });
@@ -1208,9 +1208,17 @@ addEventListener('resize', () => {
   sparkM.uniforms.uScale.value = innerHeight;
 });
 
-/* 录制：把场景摆到时间 T（自动运镜机位），渲染一帧并返回 JPEG */
+/* 录制：把场景摆到时间 T（自动运镜机位），渲染一帧并返回 JPEG
+   竖屏：机位是按 16:9 设计的，视角放宽到 50° 并沿视线拉远，保住约 70% 的横向范围，上下多出的空间正好装下龙头和管子 */
+const PORTRAIT_FOV = 50;
 function frame(T) {
   camAt(T, camera.position, controls.target);
+  if (camera.aspect < 1) {
+    const tan = d => Math.tan(d * Math.PI / 360);
+    const k = tan(35) * 16 / 9 * 0.7 / (tan(PORTRAIT_FOV) * camera.aspect);
+    camera.position.sub(controls.target).multiplyScalar(k).add(controls.target);
+    if (camera.fov !== PORTRAIT_FOV) { camera.fov = PORTRAIT_FOV; camera.updateProjectionMatrix(); }
+  }
   camera.lookAt(controls.target);
   evaluate(T, T);
   renderer.render(scene, camera);
