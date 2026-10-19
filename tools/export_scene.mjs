@@ -160,6 +160,16 @@ const BROWSER = /* js */`(async (T, scale) => {
     }
   });
 
+  // 背景板：网页背景是屏幕上的渐变（#f6fcff → #94c8ec），模型格式没有"背景"，这里在场景后方立一块贴同款渐变的不受光板子
+  {
+    const bg = scene.background;
+    const mat = new THREE.MeshBasicMaterial({ name: 'background', map: bg.isTexture ? bg : null, color: bg.isColor ? bg : 0xffffff });
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(5, 3), mat);
+    m.name = 'background';
+    m.position.set(0, -0.15, -1.2);
+    root.add(m);
+  }
+
   // 材质名去重（OBJ/FBX 按名字认材质）
   const seen = {};
   new Set(root.children.map(m => m.material)).forEach(mt => {
