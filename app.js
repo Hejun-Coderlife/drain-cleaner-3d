@@ -1211,12 +1211,15 @@ addEventListener('resize', () => {
 /* 录制：把场景摆到时间 T（自动运镜机位），渲染一帧并返回 JPEG
    竖屏：机位是按 16:9 设计的，视角放宽到 50° 并沿视线拉远，保住约 70% 的横向范围，上下多出的空间正好装下龙头和管子 */
 const PORTRAIT_FOV = 50;
+function portraitCam(P, Tg, aspect) {           // 把 16:9 机位改成竖屏机位（P 原地修改）
+  const tan = d => Math.tan(d * Math.PI / 360);
+  const k = tan(35) * 16 / 9 * 0.7 / (tan(PORTRAIT_FOV) * aspect);
+  return P.sub(Tg).multiplyScalar(k).add(Tg);
+}
 function frame(T) {
   camAt(T, camera.position, controls.target);
   if (camera.aspect < 1) {
-    const tan = d => Math.tan(d * Math.PI / 360);
-    const k = tan(35) * 16 / 9 * 0.7 / (tan(PORTRAIT_FOV) * camera.aspect);
-    camera.position.sub(controls.target).multiplyScalar(k).add(controls.target);
+    portraitCam(camera.position, controls.target, camera.aspect);
     if (camera.fov !== PORTRAIT_FOV) { camera.fov = PORTRAIT_FOV; camera.updateProjectionMatrix(); }
   }
   camera.lookAt(controls.target);
@@ -1225,4 +1228,5 @@ function frame(T) {
   return renderer.domElement.toDataURL('image/jpeg', 0.95);
 }
 
-window.DRAIN = { THREE, scene, camera, controls, renderer, DIM, TL, VIEWS, CAN, FLOW, state, setT, play, pause, goView, evaluate, frame };
+window.DRAIN = { THREE, scene, camera, controls, renderer, DIM, TL, VIEWS, CAN, FLOW, state, setT, play, pause, goView, evaluate, frame, camAt,
+  PORTRAIT: { fov: PORTRAIT_FOV, cam: portraitCam }, MORPH: [basinFoam, ovfFoam] };   // MORPH：每帧重算形状的网格（导出动画时用形态键采样）
